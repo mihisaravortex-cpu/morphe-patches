@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -109,6 +110,8 @@ public final class OpenAIClient {
             {lines}""";
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 45_000;
+    private static final int GEMINI_VALIDATION_TIMEOUT_MS = 20_000;
+    private static final int GEMINI_READ_TIMEOUT_MS = 60_000;
     private static final int MAX_CHARS = 3000;
     private static final String MODELS_PATH_SUFFIX = "/models";
     private static final String CHAT_PATH = "/chat/completions";
@@ -127,10 +130,18 @@ public final class OpenAIClient {
     private OpenAIClient() {
     }
 
+    private static boolean isGeminiEndpoint(@Nullable String baseUrl) {
+        return baseUrl != null
+                && baseUrl.toLowerCase(Locale.ROOT).contains("generativelanguage.googleapis.com");
+    }
+
     public static boolean validateConfig(String baseUrl, String apiToken, String model) {
         if (baseUrl == null || baseUrl.trim().isEmpty()
                 || model == null || model.trim().isEmpty()) {
             return false;
+        }
+        if (isGeminiEndpoint(baseUrl)) {
+            return validateGeminiNative(apiToken, model);
         }
         HttpURLConnection conn = null;
         try {
@@ -460,6 +471,10 @@ public final class OpenAIClient {
     static String request(String baseUrl, String apiToken, String model,
                           String userPrompt) {
         try {
+            if (isGeminiEndpoint(baseUrl)) {
+                return requestGeminiNative(apiToken, model, userPrompt, false);
+            }
+
             JSONObject body = new JSONObject();
             body.put("model", model);
             final String effort = reasoningEffort();
@@ -508,6 +523,135 @@ public final class OpenAIClient {
         } catch (Exception e) {
             Logger.printDebug(() -> "OpenAI request failed", e);
             return null;
+        }
+    }
+
+    private static boolean validateGeminiNative(@Nullable String apiToken, String model) {
+        if (apiToken == null || apiToken.trim().isEmpty()) {
+            return false;
+        }
+        return requestGeminiNative(apiToken, model, "Reply with OK", true) != null;
+    }
+
+    @Nullable
+    private static String requestGeminiNative(@Nullable String apiToken, String model,
+                                              String userPrompt, boolean isValidation) {
+        if (apiToken == null || apiToken.trim().isEmpty()) {
+            return null;
+        }
+        HttpURLConnection conn = null;
+        try {
+            String cleanModel = model == null ? "" : model.trim().replaceFirst("^models/", "");
+            if (cleanModel.isEmpty()) {
+                cleanModel = "gemini-4-hydrogen";
+            }
+
+            String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/"
+                    + cleanModel + ":generateContent";
+
+            JSONObject body = new JSONObject();
+            body.put("contents", new JSONArray().put(
+                    new JSONObject()
+                            .put("role", "user")
+                            .put("parts", new JSONArray().put(
+                                    new JSONObject().put("text", userPrompt)))));
+
+            JSONObject genConfig = new JSONObject();
+            genConfig.put("maxOutputTokens", isValidation ? 512 : 8192);
+
+            String lowerModel = cleanModel.toLowerCase(Locale.ROOT);
+            if (lowerModel.contains("hydrogen")
+                    || lowerModel.startsWith("gemini-3")
+                    || lowerModel.startsWith("gemini-4")) {
+                String level = reasoningEffort().toLowerCase(Locale.ROOT);
+                if (!level.equals("low") && !level.equals("medium")
+                        && !level.equals("high") && !level.equals("xhigh")) {
+                    level = "low";
+                }
+                genConfig.put("thinkingConfig", new JSONObject().put("thinkingLevel", level));
+            }
+            body.put("generationConfig", genConfig);
+
+            JSONArray safety = new JSONArray();
+            for (String category : new String[]{
+                    "HARM_CATEGORY_HARASSMENT",
+                    "HARM_CATEGORY_HATE_SPEECH",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "HARM_CATEGORY_DANGEROUS_CONTENT"}) {
+                safety.put(new JSONObject()
+                        .put("category", category)
+                        .put("threshold", "BLOCK_NONE"));
+            }
+            body.put("safetySettings", safety);
+
+            byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
+
+            conn = (HttpURLConnection) new URL(endpoint).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(isValidation ? GEMINI_VALIDATION_TIMEOUT_MS : GEMINI_READ_TIMEOUT_MS);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("x-goog-api-key", apiToken.trim());
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(payload.length);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(payload);
+            }
+
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                if (conn.getErrorStream() != null) {
+                    try (BufferedReader errReader = new BufferedReader(
+                            new InputStreamReader(conn.getErrorStream(), StandardCharsets.UTF_8))) {
+                        StringBuilder errSb = new StringBuilder();
+                        String line;
+                        while ((line = errReader.readLine()) != null) {
+                            errSb.append(line);
+                        }
+                        Logger.printDebug(() -> "Gemini HTTP " + code + ": " + errSb);
+                    }
+                }
+                return null;
+            }
+
+            JSONObject json = new JSONObject(readResponse(conn));
+            JSONArray candidates = json.optJSONArray("candidates");
+            if (candidates == null || candidates.length() == 0) {
+                return null;
+            }
+
+            JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
+            if (content == null) {
+                return null;
+            }
+
+            JSONArray parts = content.optJSONArray("parts");
+            if (parts == null) {
+                return null;
+            }
+
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < parts.length(); i++) {
+                JSONObject part = parts.getJSONObject(i);
+                if (!part.optBoolean("thought", false)) {
+                    String text = part.optString("text", "");
+                    if (!text.isEmpty()) {
+                        if (out.length() > 0) {
+                            out.append('\n');
+                        }
+                        out.append(text);
+                    }
+                }
+            }
+            return out.length() > 0 ? out.toString() : null;
+        } catch (Exception e) {
+            Logger.printDebug(() -> "Gemini native request failed", e);
+            return null;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
 
