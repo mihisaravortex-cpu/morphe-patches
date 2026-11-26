@@ -1069,5 +1069,22 @@ Lyrics come from third-party services that are not affiliated with, sponsored, o
     <!-- misc.spoof.appversion.spoofAppVersionPatch -->
     <string name="morphe_music_spoof_app_version_target_entry_8_23_51">8.23.51 - Disable bold icons</string>
     <string name="morphe_music_spoof_app_version_target_entry_9_13_51">9.13.51 - Restore Player Up next, Lyrics, and Related tabs</string>
-
+<!-- interaction.downloads.smartDownloadsPatch -->
+    <string name="morphe_smart_downloads_screen_title">Smart Downloads</string>
+    <string name="morphe_smart_downloads_screen_summary">Automatically cache frequently played songs</string>
+    <string name="morphe_smart_downloads_enabled_title">Enable Smart Downloads</string>
+    <string name="morphe_smart_downloads_play_threshold_title">Play count threshold</string>
+    <string name="morphe_smart_downloads_play_threshold_summary">Number of valid plays before caching a song</string>
+    <string name="morphe_smart_downloads_max_songs_title">Max cached songs</string>
+    <string name="morphe_smart_downloads_max_songs_summary">Maximum number of smart-cached songs (minimum 40)</string>
+    <string name="morphe_smart_downloads_inactivity_days_title">Auto-remove inactive songs</string>
+    <string name="morphe_smart_downloads_inactivity_days_summary">Remove cached songs not played within the selected period</string>
+    <string name="morphe_smart_downloads_repersonalize_days_title">Periodic re-personalization</string>
+    <string name="morphe_smart_downloads_repersonalize_days_summary">Periodically reset non-pinned smart cache entries</string>
+    <string name="morphe_smart_downloads_wifi_only_title">Wi-Fi only</string>
+    <string name="morphe_smart_downloads_status_title">Smart Cache status</string>
+    <string name="morphe_smart_downloads_status_summary">Tap to view or refresh Smart Cache status</string>
+    <string name="morphe_smart_downloads_repersonalize_now_title">Re-personalize / Clear Smart Cache</string>
+    <string name="morphe_smart_downloads_repersonalize_now_summary">Clear non-pinned cached songs and rebuild from upcoming plays</string>
 </resources>
+ 
