@@ -36,15 +36,15 @@ import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-import app.morphe.extension.music.patches.lyrics.derive.ProcessingProviders;
 import app.morphe.extension.music.patches.lyrics.derive.OpenAIClient;
+import app.morphe.extension.music.patches.lyrics.derive.ProcessingProviders;
 import app.morphe.extension.music.settings.Settings;
 import app.morphe.extension.shared.Logger;
-import app.morphe.extension.shared.settings.StringSetting;
 import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.settings.StringSetting;
 import app.morphe.extension.shared.settings.preference.CustomDialogListPreference;
-import app.morphe.extension.shared.translation.DeepLClient;
 import app.morphe.extension.shared.theme.ThemeUtils;
+import app.morphe.extension.shared.translation.DeepLClient;
 import app.morphe.extension.shared.ui.CustomDialog;
 import app.morphe.extension.shared.ui.Dim;
 
@@ -65,10 +65,6 @@ final class LyricsProviderConfigDialog {
     private LyricsProviderConfigDialog() {
     }
 
-    /**
-     * @param prompt     the prompt the service is sent, or null for a service that does not read one.
-     * @param rubyPrompt the prompt for the ruby, or null for a list that does not read it.
-     */
     static void show(Activity context, String provider, @Nullable StringSetting prompt,
                      @Nullable StringSetting rubyPrompt, Runnable onSaved) {
         final Dialog dialog;
@@ -92,7 +88,6 @@ final class LyricsProviderConfigDialog {
         }
     }
 
-    /** Calls back with whether the provider can answer with the stored settings. */
     static void validate(String provider, Consumer<Boolean> callback) {
         try {
             VALIDATION.execute(() -> {
@@ -123,17 +118,10 @@ final class LyricsProviderConfigDialog {
         }
     }
 
-    /**
-     * The OpenAI-compatible endpoint, shared by every feature that sends it requests.
-     *
-     * @param onSaved Runs after the settings are saved.
-     * @param onReset Runs after the settings are reset, or null for nothing.
-     */
     static Dialog compatibleDialog(Activity context, @Nullable StringSetting prompt,
                                    @Nullable StringSetting rubyPrompt,
                                    Runnable onSaved, @Nullable Runnable onReset) {
         LinearLayout content = createContent(context);
-        // The URL row is added last so the preset it triggers can fill the boxes above.
         EditText tokenInput = addInput(content,
                 "morphe_music_lyrics_ai_config_api_token_label",
                 Settings.LYRICS_AI_API_TOKEN.get(), true);
@@ -156,13 +144,12 @@ final class LyricsProviderConfigDialog {
         final EditText urlInput = urlBox[0];
         addTestButton(context, content, () -> {
             final String url = urlInput.getText().toString().trim();
-            if (url.isEmpty()) {
-                Utils.showToastShort(str("morphe_music_lyrics_ai_config_status_invalid_url"));
-                return;
-            }
-            test(context, () -> OpenAIClient.validateConfig(url,
+            test(context, () -> OpenAIClient.validateConfig(
+                    url,
                     tokenInput.getText().toString().trim(),
-                    modelInput.getText().toString().trim()) ? List.of("ok") : null,
+                    modelInput.getText().toString().trim(),
+                    extraHeadersInput.getText().toString().trim(),
+                    extraBodyInput.getText().toString().trim()) ? List.of("ok") : null,
                     ProcessingProviders.OPENAI_COMPATIBLE_LABEL);
         });
         addReasoningRow(content);
@@ -192,6 +179,11 @@ final class LyricsProviderConfigDialog {
                     Settings.LYRICS_AI_MODEL.resetToDefault();
                     Settings.LYRICS_AI_EXTRA_BODY.resetToDefault();
                     Settings.LYRICS_AI_EXTRA_HEADERS.resetToDefault();
+                    urlInput.setText(Settings.LYRICS_AI_BASE_URL.get());
+                    tokenInput.setText(Settings.LYRICS_AI_API_TOKEN.get());
+                    modelInput.setText(Settings.LYRICS_AI_MODEL.get());
+                    extraHeadersInput.setText(Settings.LYRICS_AI_EXTRA_HEADERS.get());
+                    extraBodyInput.setText(Settings.LYRICS_AI_EXTRA_BODY.get());
                     promptField.reset();
                     rubyPromptField.reset();
                     if (onReset != null) {
@@ -241,7 +233,6 @@ final class LyricsProviderConfigDialog {
                 () -> keyInput.getText().toString().trim().isEmpty());
     }
 
-    /** The prompt box and the setting behind it; a no-op pair when the service takes no prompt. */
     private static final class PromptField {
         @Nullable
         private final StringSetting setting;
@@ -277,7 +268,6 @@ final class LyricsProviderConfigDialog {
         }
     }
 
-    /** The prompt box for a list whose service reads one; null for both members otherwise. */
     private static PromptField addPromptSection(LinearLayout content,
                                                 @Nullable StringSetting prompt,
                                                 String labelKey) {
@@ -375,14 +365,18 @@ final class LyricsProviderConfigDialog {
                             "morphe_music_lyrics_ai_config_status_connected",
                             label, response.get(0)));
                 } else {
-                    Utils.showToastShort(str(
-                            "morphe_music_lyrics_ai_config_status_failed", label));
+                    String err = OpenAIClient.getLastError();
+                    if (err != null && !err.isEmpty()) {
+                        Utils.showToastShort(label + ": " + err);
+                    } else {
+                        Utils.showToastShort(str(
+                                "morphe_music_lyrics_ai_config_status_failed", label));
+                    }
                 }
             });
         });
     }
 
-    /** The endpoint box and its preset button, added at the top of the form. */
     private static EditText addBaseUrlInput(LinearLayout section, String value,
                                            Consumer<ProcessingProviders.EndpointPreset> onPresetPicked) {
         final Context context = section.getContext();
@@ -420,11 +414,6 @@ final class LyricsProviderConfigDialog {
         return input;
     }
 
-    /**
-     * The reasoning effort sent with each request. Which levels exist belongs to the endpoint, so the
-     * row stays hidden until it has asked: an endpoint that names no levels takes no effort from us,
-     * and showing a fixed list would offer choices the model cannot honor.
-     */
     private static void addReasoningRow(LinearLayout section) {
         final Context context = section.getContext();
         final int fg = ThemeUtils.getAppForegroundColor();
@@ -500,14 +489,10 @@ final class LyricsProviderConfigDialog {
         return label;
     }
 
-    /** A triangle reads as play for the action button and as a menu for the two drop-downs. */
     private enum Glyph {
-        /** Filled, laid out along the line height so it reads like the app's own play icon. */
         PLAY('▶', 11),
-        /** A small open arrow in the line's upper half, where a drop-down arrow sits. */
         DOWN('▾', 13);
 
-        /** Circles, so they read as icon buttons rather than as one-letter labels. */
         private static final int SIZE_DP = 36;
 
         final char character;
@@ -561,13 +546,11 @@ final class LyricsProviderConfigDialog {
         input.setVerticalScrollBarEnabled(true);
     }
 
-    /** A hint defaults to a fixed gray the dark theme leaves unreadable, so it follows the app. */
     static void setHint(EditText input, String hintKey) {
         input.setHint(str(hintKey));
         input.setHintTextColor((0x99 << 24) | (ThemeUtils.getAppForegroundColor() & 0x00FFFFFF));
     }
 
-    /** A model name input with a button that lists the models the provider offers. */
     static EditText addModelInput(LinearLayout section, String value,
                                   Supplier<List<String>> fetchModels) {
         final Context context = section.getContext();
@@ -604,7 +587,12 @@ final class LyricsProviderConfigDialog {
 
     private static void showModelPicker(Context context, @Nullable List<String> models, EditText target) {
         if (models == null || models.isEmpty()) {
-            Utils.showToastShort(str("morphe_music_lyrics_ai_config_fetch_models_failed"));
+            String err = OpenAIClient.getLastError();
+            if (err != null && !err.isEmpty()) {
+                Utils.showToastShort("Fetch models: " + err);
+            } else {
+                Utils.showToastShort(str("morphe_music_lyrics_ai_config_fetch_models_failed"));
+            }
             return;
         }
         String[] items = models.toArray(new String[0]);
@@ -625,4 +613,3 @@ final class LyricsProviderConfigDialog {
         params.bottomMargin = Dim.dp4;
         section.addView(testButton, params);
     }
-}
