@@ -443,7 +443,13 @@ public class Settings extends SharedYouTubeSettings {
     public static final StringSetting SB_CATEGORY_FILLER_COLOR = new StringSetting("morphe_sb_filler_color", "#FF7300FF", parent(SB_ENABLED));
     public static final StringSetting SB_CATEGORY_MUSIC_OFFTOPIC = new StringSetting("morphe_sb_music_offtopic", SKIP_AUTOMATICALLY.morpheKeyValue, parent(SB_ENABLED));
     public static final StringSetting SB_CATEGORY_MUSIC_OFFTOPIC_COLOR = new StringSetting("morphe_sb_music_offtopic_color", "#FFFF9900", parent(SB_ENABLED));
-
+   // Smart Downloads
+    public static final BooleanSetting SMART_DOWNLOADS_ENABLED = new BooleanSetting("morphe_smart_downloads_enabled", TRUE);
+    public static final IntegerSetting SMART_DOWNLOADS_PLAY_THRESHOLD = new IntegerSetting("morphe_smart_downloads_play_threshold", 3, parent(SMART_DOWNLOADS_ENABLED));
+    public static final IntegerSetting SMART_DOWNLOADS_MAX_SONGS = new IntegerSetting("morphe_smart_downloads_max_songs", 60, parent(SMART_DOWNLOADS_ENABLED));
+    public static final IntegerSetting SMART_DOWNLOADS_INACTIVITY_DAYS = new IntegerSetting("morphe_smart_downloads_inactivity_days", 14, parent(SMART_DOWNLOADS_ENABLED));
+    public static final IntegerSetting SMART_DOWNLOADS_REPERSONALIZE_DAYS = new IntegerSetting("morphe_smart_downloads_repersonalize_days", 0, parent(SMART_DOWNLOADS_ENABLED));
+    public static final BooleanSetting SMART_DOWNLOADS_WIFI_ONLY = new BooleanSetting("morphe_smart_downloads_wifi_only", TRUE, parent(SMART_DOWNLOADS_ENABLED));
     // Video
     public static final BooleanSetting VIDEO_EFFECT_MENU = new BooleanSetting("morphe_music_video_effect_menu", TRUE);
     public static final BooleanSetting REMEMBER_VIDEO_QUALITY_LAST_SELECTED_TOAST = new BooleanSetting("morphe_remember_video_quality_last_selected_toast", TRUE, false, parent(REMEMBER_VIDEO_QUALITY_LAST_SELECTED));
