@@ -57,6 +57,10 @@ public final class ProcessingProviders {
             EndpointPreset.of("Gemini",
                     "https://generativelanguage.googleapis.com/v1beta/openai",
                     "models/gemini-2.5-flash"),
+            // Google's own API, no compatibility layer; the client picks this path by the host.
+            // Built directly, since chatUrl would append /chat/completions to the root.
+            new EndpointPreset("Gemini (native)",
+                    "https://generativelanguage.googleapis.com/v1beta", "gemini-4-hydrogen"),
             EndpointPreset.of("OpenRouter", "https://openrouter.ai/api/v1"),
             EndpointPreset.of("DeepSeek", "https://api.deepseek.com/v1"),
             EndpointPreset.of("Groq", "https://api.groq.com/openai/v1"),

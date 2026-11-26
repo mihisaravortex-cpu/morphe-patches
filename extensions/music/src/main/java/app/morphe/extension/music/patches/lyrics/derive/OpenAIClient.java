@@ -15,14 +15,17 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -132,13 +135,30 @@ public final class OpenAIClient {
                 || model == null || model.trim().isEmpty()) {
             return false;
         }
+        if (isGeminiNative(baseUrl)) {
+            return validateGemini(baseUrl, apiToken, model);
+        }
+        int code = postValidation(baseUrl, apiToken, model, true);
+        if (code == 400) {
+            // Some models refuse max_tokens, or spend it on thinking before they answer.
+            // Try once more with no limit before calling the settings wrong.
+            code = postValidation(baseUrl, apiToken, model, false);
+        }
+        return code == 200;
+    }
+
+    /** The HTTP status of a test request, or -1 when it could not be sent. */
+    private static int postValidation(String baseUrl, @Nullable String apiToken, String model,
+                                      boolean limitTokens) {
         HttpURLConnection conn = null;
         try {
             JSONObject body = new JSONObject();
             body.put("model", model);
             body.put("messages", new JSONArray().put(
                     new JSONObject().put("role", "user").put("content", "hi")));
-            body.put("max_tokens", 1);
+            if (limitTokens) {
+                body.put("max_tokens", 1);
+            }
             // Validate with the same body the feature will send, so what works here works there.
             applyExtraBody(body);
 
@@ -160,10 +180,18 @@ public final class OpenAIClient {
                 stream.write(payload);
             }
 
-            return conn.getResponseCode() == 200;
+            final int code = conn.getResponseCode();
+            if (code != 200) {
+                lastError = describeError(conn, code);
+                Logger.printDebug(() -> "AI endpoint test failed: " + lastError);
+            } else {
+                lastError = "";
+            }
+            return code;
         } catch (Exception ex) {
+            lastError = String.valueOf(ex);
             Logger.printDebug(() -> "Could not validate the AI endpoint", ex);
-            return false;
+            return -1;
         } finally {
             if (conn != null) {
                 conn.disconnect();
@@ -172,6 +200,9 @@ public final class OpenAIClient {
     }
 
     public static String[] fetchReasoningEfforts(String baseUrl, String apiToken, String model) {
+        if (isGeminiNative(baseUrl)) {
+            return geminiReasoningEfforts(model);
+        }
         final String models = listModels(baseUrl, apiToken);
         if (models == null) {
             return new String[0];
@@ -186,6 +217,9 @@ public final class OpenAIClient {
 
     /** The ids of the models the endpoint lists, empty when it lists none. */
     public static List<String> fetchModels(String baseUrl, @Nullable String apiToken) {
+        if (isGeminiNative(baseUrl)) {
+            return fetchGeminiModels(baseUrl, apiToken);
+        }
         List<String> ids = new ArrayList<>();
         final String models = listModels(baseUrl, apiToken);
         if (models == null) {
@@ -459,6 +493,9 @@ public final class OpenAIClient {
     @Nullable
     static String request(String baseUrl, String apiToken, String model,
                           String userPrompt) {
+        if (isGeminiNative(baseUrl)) {
+            return requestGemini(baseUrl, apiToken, model, userPrompt);
+        }
         try {
             JSONObject body = new JSONObject();
             body.put("model", model);
@@ -509,6 +546,299 @@ public final class OpenAIClient {
             Logger.printDebug(() -> "OpenAI request failed", e);
             return null;
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Gemini native API. Used instead of the OpenAI-style path when the base URL points at
+    // generativelanguage.googleapis.com without "/openai" in it, so no compatibility layer sits
+    // between the app and the model. Every entry point above routes here by that one test.
+    // ---------------------------------------------------------------------------------------
+
+    private static final String GEMINI_HOST = "generativelanguage.googleapis.com";
+    private static final String GEMINI_API_KEY_HEADER = "x-goog-api-key";
+    private static final String GEMINI_MODELS_PREFIX = "models/";
+    private static final String GEMINI_DEFAULT_VERSION = "/v1beta";
+    private static final Pattern GEMINI_MODEL_ID = Pattern.compile("[A-Za-z0-9._\\-]+");
+
+    /** What the last failed test or request got back, for the log; empty after a success. */
+    private static volatile String lastError = "";
+
+    public static String lastError() {
+        return lastError;
+    }
+
+    static boolean isGeminiNative(@Nullable String baseUrl) {
+        if (baseUrl == null) {
+            return false;
+        }
+        try {
+            final URL url = new URL(baseUrl.trim());
+            return GEMINI_HOST.equalsIgnoreCase(url.getHost())
+                    && !url.getPath().contains("/openai");
+        } catch (MalformedURLException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The API root, e.g. {@code https://generativelanguage.googleapis.com/v1beta}, whatever the
+     * user pasted: the root itself, a models address, or a chat completions address.
+     */
+    static String geminiRoot(String baseUrl) {
+        String base = baseUrl.trim();
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        final int pathStart = base.indexOf('/', base.indexOf("://") + 3);
+        if (pathStart < 0) {
+            return base + GEMINI_DEFAULT_VERSION;
+        }
+        String path = base.substring(pathStart);
+        for (String marker : new String[]{"/models", "/chat/completions", "/completions",
+                "/interactions"}) {
+            final int cut = path.indexOf(marker);
+            if (cut >= 0) {
+                path = path.substring(0, cut);
+            }
+        }
+        return base.substring(0, pathStart) + (path.isEmpty() ? GEMINI_DEFAULT_VERSION : path);
+    }
+
+    /** The model id without the optional "models/" prefix, or null when it is not a usable id. */
+    @Nullable
+    static String geminiModelId(@Nullable String model) {
+        if (model == null) {
+            return null;
+        }
+        String id = model.trim();
+        if (id.startsWith(GEMINI_MODELS_PREFIX)) {
+            id = id.substring(GEMINI_MODELS_PREFIX.length());
+        }
+        return GEMINI_MODEL_ID.matcher(id).matches() ? id : null;
+    }
+
+    /**
+     * Maps the stored effort onto Gemini's thinking settings: a whole number is a token budget
+     * (Gemini 2.x models), a word is a thinking level (Gemini 3 and later). Null for no effort.
+     */
+    @Nullable
+    static JSONObject geminiThinkingConfig(@Nullable String effort) throws JSONException {
+        if (effort == null || effort.trim().isEmpty()) {
+            return null;
+        }
+        String value = effort.trim().toLowerCase(Locale.ROOT);
+        if (value.matches("-?\\d+")) {
+            return new JSONObject().put("thinkingBudget", Integer.parseInt(value));
+        }
+        if (value.equals("none") || value.equals("off")) {
+            value = "minimal";
+        }
+        return new JSONObject().put("thinkingLevel", value);
+    }
+
+    private static String[] geminiReasoningEfforts(@Nullable String model) {
+        final String id = geminiModelId(model);
+        // Gemini 2.x models take a token budget, not a level; offering levels there would fail.
+        if (id == null || id.toLowerCase(Locale.ROOT).startsWith("gemini-2")) {
+            return new String[0];
+        }
+        return new String[]{"low", "medium", "high"};
+    }
+
+    private static JSONObject geminiBody(String userPrompt) throws JSONException {
+        final JSONObject body = new JSONObject();
+        body.put("contents", new JSONArray().put(new JSONObject()
+                .put("role", "user")
+                .put("parts", new JSONArray().put(new JSONObject().put("text", userPrompt)))));
+        final JSONObject thinking = geminiThinkingConfig(reasoningEffort());
+        if (thinking != null) {
+            body.put("generationConfig", new JSONObject().put("thinkingConfig", thinking));
+        }
+        // Applied last, so user body wins even where it disagrees with the effort.
+        applyExtraBody(body);
+        return body;
+    }
+
+    private static boolean validateGemini(String baseUrl, @Nullable String apiToken, String model) {
+        try {
+            final String id = geminiModelId(model);
+            if (id == null) {
+                lastError = "Not a usable Gemini model id: " + model;
+                return false;
+            }
+            return postGemini(geminiRoot(baseUrl) + "/models/" + id + ":generateContent",
+                    apiToken, geminiBody("hi")) != null;
+        } catch (Exception ex) {
+            lastError = String.valueOf(ex);
+            Logger.printDebug(() -> "Could not validate the Gemini endpoint", ex);
+            return false;
+        }
+    }
+
+    @Nullable
+    private static String requestGemini(String baseUrl, @Nullable String apiToken, String model,
+                                        String userPrompt) {
+        try {
+            final String id = geminiModelId(model);
+            if (id == null) {
+                lastError = "Not a usable Gemini model id: " + model;
+                return null;
+            }
+            final String response = postGemini(
+                    geminiRoot(baseUrl) + "/models/" + id + ":generateContent",
+                    apiToken, geminiBody(userPrompt));
+            return response == null ? null : parseGeminiContent(response);
+        } catch (Exception e) {
+            lastError = String.valueOf(e);
+            Logger.printDebug(() -> "Gemini request failed", e);
+            return null;
+        }
+    }
+
+    /** The response body of a 200, or null with {@link #lastError} set. */
+    @Nullable
+    private static String postGemini(String url, @Nullable String apiToken, JSONObject body) {
+        HttpURLConnection conn = null;
+        try {
+            final byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
+            conn.setRequestProperty("Content-Type", "application/json");
+            if (apiToken != null && !apiToken.isEmpty()) {
+                conn.setRequestProperty(GEMINI_API_KEY_HEADER, apiToken);
+            }
+            applyExtraHeaders(conn);
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(payload.length);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(payload);
+            }
+
+            final int code = conn.getResponseCode();
+            if (code != 200) {
+                lastError = describeError(conn, code);
+                Logger.printDebug(() -> "Gemini request failed: " + lastError);
+                return null;
+            }
+            lastError = "";
+            return readResponse(conn);
+        } catch (Exception e) {
+            lastError = String.valueOf(e);
+            Logger.printDebug(() -> "Gemini request failed", e);
+            return null;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    /** The visible answer. Parts marked as thoughts are the model's reasoning and are left out. */
+    @Nullable
+    static String parseGeminiContent(String jsonResponse) throws JSONException {
+        final JSONArray candidates = new JSONObject(jsonResponse).optJSONArray("candidates");
+        if (candidates == null || candidates.length() == 0) {
+            return null;
+        }
+        final JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
+        if (content == null) {
+            return null;
+        }
+        final JSONArray parts = content.optJSONArray("parts");
+        if (parts == null) {
+            return null;
+        }
+        final StringBuilder text = new StringBuilder();
+        for (int i = 0; i < parts.length(); i++) {
+            final JSONObject part = parts.optJSONObject(i);
+            if (part == null || part.optBoolean("thought", false)) {
+                continue;
+            }
+            text.append(part.optString("text", ""));
+        }
+        return text.length() == 0 ? null : text.toString();
+    }
+
+    /** The models that can generate text, as ids without the "models/" prefix. */
+    private static List<String> fetchGeminiModels(String baseUrl, @Nullable String apiToken) {
+        final List<String> ids = new ArrayList<>();
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(
+                    geminiRoot(baseUrl) + "/models?pageSize=1000").openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
+            if (apiToken != null && !apiToken.isEmpty()) {
+                conn.setRequestProperty(GEMINI_API_KEY_HEADER, apiToken);
+            }
+            applyExtraHeaders(conn);
+            final int code = conn.getResponseCode();
+            if (code != 200) {
+                lastError = describeError(conn, code);
+                return ids;
+            }
+            final JSONArray models = new JSONObject(readResponse(conn)).optJSONArray("models");
+            if (models == null) {
+                return ids;
+            }
+            for (int i = 0; i < models.length(); i++) {
+                final JSONObject entry = models.optJSONObject(i);
+                if (entry == null) {
+                    continue;
+                }
+                String name = entry.optString("name", "");
+                if (name.startsWith(GEMINI_MODELS_PREFIX)) {
+                    name = name.substring(GEMINI_MODELS_PREFIX.length());
+                }
+                if (!name.isEmpty() && canGenerateContent(entry.optJSONArray(
+                        "supportedGenerationMethods"))) {
+                    ids.add(name);
+                }
+            }
+        } catch (Exception e) {
+            lastError = String.valueOf(e);
+            Logger.printDebug(() -> "Could not list the Gemini models", e);
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+        return ids;
+    }
+
+    /** A model that does not say what it supports is kept rather than hidden. */
+    private static boolean canGenerateContent(@Nullable JSONArray methods) {
+        if (methods == null) {
+            return true;
+        }
+        for (int i = 0; i < methods.length(); i++) {
+            if ("generateContent".equals(methods.optString(i, ""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** "HTTP 400: ..." with the start of the error body, which says what the provider objected to. */
+    private static String describeError(HttpURLConnection conn, int code) {
+        final StringBuilder detail = new StringBuilder();
+        try (InputStream stream = conn.getErrorStream()) {
+            if (stream != null) {
+                final BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(stream, StandardCharsets.UTF_8));
+                final char[] buffer = new char[300];
+                final int read = reader.read(buffer);
+                if (read > 0) {
+                    detail.append(buffer, 0, read);
+                }
+            }
+        } catch (IOException ignored) {
+            // The status alone still says something.
+        }
+        return "HTTP " + code + (detail.length() == 0 ? "" : ": " + detail.toString().trim());
     }
 
     static String readResponse(HttpURLConnection conn) throws IOException {
