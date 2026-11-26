@@ -39,10 +39,7 @@ public final class SeriesTrackerPatch {
 
     static {
         if (ENABLED) {
-            VideoState.getOnChange().addObserver(state -> {
-                videoStateChanged(state);
-                return kotlin.Unit.INSTANCE;
-            });
+            VideoState.getOnChange().addObserver(SeriesTrackerPatch::videoStateChanged);
         }
     }
 
@@ -73,6 +70,14 @@ public final class SeriesTrackerPatch {
         } catch (Exception ex) {
             Logger.printException(() -> "videoTimeChanged failure", ex);
         }
+    }
+
+    /**
+     * Autoplay control leaves the next video to an active series session, which follows the
+     * series order.
+     */
+    public static boolean hasActiveSession() {
+        return ENABLED && SeriesPlayback.active();
     }
 
     /**

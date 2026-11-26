@@ -11,6 +11,9 @@ import android.app.Activity;
 import android.content.Context;
 
 import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Consumer;
 
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.youtube.patches.VideoInformation;
@@ -32,7 +35,7 @@ final class PlayerSeriesAction {
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
         if (pending.get() == activity) return;
         String video = activeVideo();
-        if (!video.matches("[A-Za-z0-9_-]{11}")) {
+        if (!VideoInformation.isVideoId(video)) {
             HistoryUi.open(activity);
             return;
         }
@@ -52,12 +55,12 @@ final class PlayerSeriesAction {
                         HistoryUi.openSeries(activity, followed);
                         return;
                     }
-                    java.util.function.Consumer<String> done =
+                    Consumer<String> done =
                             id ->
-                                    Utils.showToastShort(UiText.get("morphe_series_tracker_followed"));
+                                    Utils.showSnackbarShort(UiText.get("morphe_series_tracker_followed"));
                     if (playlist.isEmpty()) {
-                        java.util.List<PlaylistDiscovery.Match> saved =
-                                new java.util.ArrayList<>();
+                        List<PlaylistDiscovery.Match> saved =
+                                new ArrayList<>();
                         for (TrackerModels.Series series : rows) {
                             if (series.bookmarkId().equals(video)
                                     || series.episodes().stream()
@@ -74,12 +77,12 @@ final class PlayerSeriesAction {
                 message -> {
                     pending.clear();
                     if (!activity.isFinishing() && !activity.isDestroyed())
-                        Utils.showToastLong(UiText.get(message));
+                        Utils.showSnackbarLong(UiText.get(message));
                 });
     }
 
     static String followedSeries(
-            java.util.List<TrackerModels.Series> rows, String playlist, String video) {
+            List<TrackerModels.Series> rows, String playlist, String video) {
         if (!playlist.isEmpty()) {
             for (TrackerModels.Series series : rows) {
                 if (series.id().equals(playlist)) {

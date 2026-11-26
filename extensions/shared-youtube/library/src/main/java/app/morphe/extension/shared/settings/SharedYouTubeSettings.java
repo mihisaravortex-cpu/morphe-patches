@@ -2,8 +2,14 @@ package app.morphe.extension.shared.settings;
 
 import static java.lang.Boolean.FALSE;
 import static java.lang.Boolean.TRUE;
+import static app.morphe.extension.shared.StringRef.sf;
+import static app.morphe.extension.shared.patches.AppCheckPatch.IS_YOUTUBE_MUSIC;
 import static app.morphe.extension.shared.settings.Setting.migrateOldSettingToNew;
 import static app.morphe.extension.shared.settings.Setting.parent;
+import static app.morphe.extension.shared.settings.Setting.parentNot;
+import static app.morphe.extension.shared.settings.Setting.parentsAll;
+
+import java.util.EnumSet;
 
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.patches.BaseAppRefreshRatePatch.AppRefreshType;
@@ -15,9 +21,16 @@ import app.morphe.extension.shared.patches.CustomFontPatch.FontType;
 import app.morphe.extension.shared.patches.DownloadMode;
 import app.morphe.extension.shared.patches.PoTokenProviderPatch.PoTokenProviderAvailability;
 import app.morphe.extension.shared.patches.SkipSilencePatch.MinimumPause;
+import app.morphe.extension.shared.patches.SplashAnimationPatch;
 import app.morphe.extension.shared.patches.SplashAnimationPatch.SplashScreenAnimationStyle;
+import app.morphe.extension.shared.patches.VideoEffectPresets;
+import app.morphe.extension.shared.patches.components.LithoFilterPatch.LithoLogging;
+import app.morphe.extension.shared.patches.glassmenus.GlassMenusPatch.GlassMenusAvailability;
 import app.morphe.extension.shared.settings.preference.ExternalDownloaderPreference.ExternalDownloaderAvailability;
+import app.morphe.extension.shared.settings.preference.SeekBarPreference;
+import app.morphe.extension.shared.settings.preference.SeekBarPreference.SeekBarConfig;
 import app.morphe.extension.shared.spoof.SpoofVideoStreamsPatch.JavaScriptClientAvailability;
+import app.morphe.extension.shared.spoof.SpoofVideoStreamsPatch.JavaScriptVariantAvailability;
 import app.morphe.extension.shared.spoof.js.JavaScriptVariant;
 import app.morphe.extension.shared.theme.ThemeColorPatch.ThemeColorChangeForegroundAvailability;
 import app.morphe.extension.shared.theme.ThemeColorPatch.ThemeColorCustomAvailability;
@@ -36,6 +49,7 @@ public class SharedYouTubeSettings extends BaseSettings {
 
     public static final BooleanSetting SETTINGS_SEARCH_HISTORY = new BooleanSetting("morphe_settings_search_history", TRUE, true);
     public static final StringSetting SETTINGS_SEARCH_ENTRIES = new StringSetting("morphe_settings_search_entries", "");
+    public static final IntegerSetting SETTINGS_NEW_INDICATOR_DAYS = new IntegerSetting("morphe_settings_new_indicator_days", 2);
 
     // Network proxy
     // There are multiple endpoint calls due to the spoof video streams patch. Place the proxy settings first.
@@ -48,10 +62,17 @@ public class SharedYouTubeSettings extends BaseSettings {
     public static final StringSetting PROXY_AUTH_PASSWORD = new StringSetting("morphe_proxy_auth_password", "", true, false, null, parent(PROXY_AUTH_ENABLED));
     public static final BooleanSetting PROXY_ALLOW_DIRECT_FALLBACK = new BooleanSetting("morphe_proxy_allow_direct_fallback", FALSE, true, parent(PROXY_ENABLED));
 
-    public static final BooleanSetting DISABLE_DRC_AUDIO = new BooleanSetting("morphe_disable_drc_audio", FALSE, true);
+    public static final BooleanSetting DISABLE_DRC_AUDIO = new BooleanSetting("morphe_disable_drc_audio_stream", FALSE, true);
+    public static final BooleanSetting DISABLE_LOUDNESS_NORMALIZATION = new BooleanSetting("morphe_disable_loudness_normalization", FALSE, true);
     public static final BooleanSetting FORCE_ORIGINAL_AUDIO = new BooleanSetting("morphe_force_original_audio", TRUE, true);
+    public static final BooleanSetting PRIORITIZE_VIDEO_QUALITY = new BooleanSetting("morphe_prioritize_video_quality", TRUE, true, "morphe_prioritize_video_quality_dialog");
     public static final BooleanSetting SKIP_SILENCE = new BooleanSetting("morphe_skip_silence", FALSE, true);
     public static final EnumSetting<MinimumPause> SKIP_SILENCE_MINIMUM_PAUSE = new EnumSetting<>("morphe_skip_silence_minimum_pause", MinimumPause.MS_700, true, parent(SKIP_SILENCE));
+    /**
+     * Name of the selected effect of {@link #VIDEO_EFFECTS_CUSTOM}, or empty for no effect.
+     */
+    public static final StringSetting VIDEO_EFFECT = new StringSetting("morphe_video_effect", "");
+    public static final StringSetting VIDEO_EFFECTS_CUSTOM = new StringSetting("morphe_video_effects_custom", VideoEffectPresets.DEFAULT_CUSTOM_EFFECTS);
 
     // Ads
     public static final BooleanSetting HIDE_FULLSCREEN_ADS = new BooleanSetting("morphe_hide_fullscreen_ads", TRUE);
@@ -61,6 +82,9 @@ public class SharedYouTubeSettings extends BaseSettings {
     // Media notification controls
     public static final BooleanSetting DISABLE_NOTIFICATION_MEDIA_SEEKBAR = new BooleanSetting("morphe_disable_notification_media_seekbar", FALSE, true);
     public static final BooleanSetting HIDE_NOTIFICATION_MEDIA_PREV_NEXT = new BooleanSetting("morphe_hide_notification_media_prev_next", FALSE, true);
+    public static final BooleanSetting SEEK_NOTIFICATION_MEDIA_PREV_NEXT = new BooleanSetting("morphe_seek_notification_media_prev_next", FALSE, true, parentNot(HIDE_NOTIFICATION_MEDIA_PREV_NEXT));
+    public static final IntegerSetting SEEK_NOTIFICATION_MEDIA_REWIND_LENGTH = new IntegerSetting("morphe_seek_notification_media_rewind_length", 10, true, parent(SEEK_NOTIFICATION_MEDIA_PREV_NEXT));
+    public static final IntegerSetting SEEK_NOTIFICATION_MEDIA_FAST_FORWARD_LENGTH = new IntegerSetting("morphe_seek_notification_media_fast_forward_length", 10, true, parent(SEEK_NOTIFICATION_MEDIA_PREV_NEXT));
 
     public static final BooleanSetting CHECK_WATCH_HISTORY_DOMAIN_NAME = new BooleanSetting("morphe_check_watch_history_domain_name", TRUE, false, false);
 
@@ -71,47 +95,58 @@ public class SharedYouTubeSettings extends BaseSettings {
     public static final StringSetting THEME_COLOR_LIGHT_CUSTOM = new StringSetting("morphe_theme_color_light_custom", "#FFFFFF", true, new ThemeColorCustomAvailability(THEME_COLOR_LIGHT));
     public static final BooleanSetting THEME_COLOR_CHANGE_FOREGROUND = new BooleanSetting("morphe_theme_color_change_foreground", false, true, new ThemeColorChangeForegroundAvailability());
     public static final BooleanSetting THEME_LAST_USED_DARK_MODE = new BooleanSetting("morphe_theme_last_used_dark_mode", Utils.isDarkModeEnabled(), false, false);
+    public static final IntegerSetting THEME_LAST_SPLASH_SCREEN_INDEX = new IntegerSetting("morphe_theme_last_splash_screen_index", -1, false, false);
 
     // Custom branding
-    public static final EnumSetting<SplashScreenAnimationStyle> SPLASH_SCREEN_ANIMATION_STYLE = new EnumSetting<>("morphe_splash_screen_animation_style", SplashScreenAnimationStyle.FPS_60_ONE_SECOND, true);
+    public static final EnumSetting<SplashScreenAnimationStyle> SPLASH_SCREEN_STYLE = new EnumSetting<>("morphe_splash_screen_style", SplashAnimationPatch.getDefaultStyle(), true);
     public static final EnumSetting<BrandingTheme> CUSTOM_BRANDING_ICON = new EnumSetting<>("morphe_custom_branding_icon", CustomBrandingPatch.getDefaultIconStyle(), true, "morphe_custom_branding_icon_user_dialog_message");
-    public static final EnumSetting<NotificationIconTheme> CUSTOM_BRANDING_NOTIFICATION_ICON = new EnumSetting<>("morphe_custom_branding_notification_icon", NotificationIconTheme.FOLLOW, true);
+    public static final EnumSetting<NotificationIconTheme> CUSTOM_BRANDING_NOTIFICATION_ICON = new EnumSetting<>("morphe_custom_branding_notification_icon", NotificationIconTheme.FOLLOW, true, "morphe_custom_branding_icon_user_dialog_message");
     public static final IntegerSetting CUSTOM_BRANDING_NAME = new IntegerSetting("morphe_custom_branding_name", CustomBrandingPatch.getDefaultAppNameIndex(), true);
     public static final StringSetting CUSTOM_BRANDING_ICON_PATCHED = new StringSetting("morphe_custom_branding_icon_patched", "", false, false);
 
     // Miscellaneous
-    public static final BooleanSetting DEBUG_PROTOBUFFER = new BooleanSetting("morphe_debug_protobuffer", FALSE, false, "morphe_debug_protobuffer_user_dialog_message", parent(DEBUG));
-    public static final BooleanSetting DEBUG_SPANNABLE = new BooleanSetting("morphe_debug_spannable", FALSE, parent(DEBUG));
-    public static final StringSetting DISABLED_FEATURE_FLAGS = new StringSetting("morphe_disabled_feature_flags", "", true, parent(DEBUG));
-    public static final StringSetting FORCED_FEATURE_FLAGS = new StringSetting("morphe_forced_feature_flags", "", true, parent(DEBUG));
-    public static final StringSetting FEATURE_FLAGS_BISECT = new StringSetting("morphe_feature_flags_bisect", "", false, false, null, parent(DEBUG));
+    public static final EnumSetting<LithoLogging> DEBUG_LITHO = new EnumSetting<>("morphe_debug_litho", LithoLogging.DISABLED, false, "morphe_debug_litho_user_dialog_message", parentNot(DEBUG_LEVEL, DebugLevel.DISABLED));
+    public static final BooleanSetting DEBUG_SPANNABLE = new BooleanSetting("morphe_debug_spannable", FALSE, parentNot(DEBUG_LEVEL, DebugLevel.DISABLED));
     public static final BooleanSetting DISABLE_QUIC_PROTOCOL = new BooleanSetting("morphe_disable_quic_protocol", FALSE, true);
     public static final BooleanSetting SANITIZE_SHARING_LINKS = new BooleanSetting("morphe_sanitize_sharing_links", TRUE);
     public static final BooleanSetting REPLACE_MUSIC_LINKS_WITH_YOUTUBE = new BooleanSetting("morphe_replace_music_with_youtube", FALSE);
     public static final BooleanSetting REPLACE_LINKS_WITH_SHORTENER = new BooleanSetting("morphe_replace_links_with_shortener", FALSE);
 
+    // Video quality
+    public static final IntegerSetting VIDEO_QUALITY_DEFAULT_WIFI = new IntegerSetting("morphe_video_quality_default_wifi", -2);
+    public static final IntegerSetting VIDEO_QUALITY_DEFAULT_MOBILE = new IntegerSetting("morphe_video_quality_default_mobile", -2);
+    public static final BooleanSetting REMEMBER_VIDEO_QUALITY_LAST_SELECTED = new BooleanSetting("morphe_remember_video_quality_last_selected", FALSE);
+
     // Spoof video streams
     public static final BooleanSetting SPOOF_VIDEO_STREAMS = new BooleanSetting("morphe_spoof_video_streams", TRUE, true, "morphe_spoof_video_streams_user_dialog_message");
     public static final BooleanSetting SPOOF_VIDEO_STREAMS_STATS_FOR_NERDS = new BooleanSetting("morphe_spoof_video_streams_stats_for_nerds", TRUE, parent(SPOOF_VIDEO_STREAMS));
-    public static final EnumSetting<JavaScriptVariant> SPOOF_VIDEO_STREAMS_PLAYER_JS_VARIANT = new EnumSetting<>("morphe_spoof_video_streams_player_js_variant", JavaScriptVariant.HOUSE_BRAND, true, new JavaScriptClientAvailability());
+    public static final BooleanSetting SPOOF_VIDEO_STREAMS_PLAYER_JS_QUACK = new BooleanSetting("morphe_spoof_video_streams_player_js_quack", TRUE, true, new JavaScriptClientAvailability());
+    public static final EnumSetting<JavaScriptVariant> SPOOF_VIDEO_STREAMS_PLAYER_JS_VARIANT = new EnumSetting<>("morphe_spoof_video_streams_player_js_variant", JavaScriptVariant.HOUSE_BRAND, true, new JavaScriptVariantAvailability());
     public static final StringSetting SPOOF_VIDEO_STREAMS_PLAYER_JS_HASH_VALUE = new StringSetting("morphe_spoof_video_streams_player_js_hash_value", "", true, false);
     public static final LongSetting SPOOF_VIDEO_STREAMS_PLAYER_JS_SAVED_MILLISECONDS = new LongSetting("morphe_spoof_video_streams_player_js_saved_milliseconds", -1L, false, false);
     public static final StringSetting OAUTH2_REFRESH_TOKEN = new StringSetting("morphe_oauth2_refresh_token", "", false, false);
     public static final StringSetting SPOOF_VIDEO_STREAMS_CLIENT_IDS = new StringSetting("morphe_spoof_video_streams_clent_id", "", false, false);
     public static final BooleanSetting SPOOF_VIDEO_STREAMS_CLIENT_FAILING_DIALOG = new BooleanSetting("morphe_spoof_video_streams_client_failing_dialog", FALSE, false, false);
     public static final LongSetting SPOOF_VIDEO_STREAMS_CLIENT_FAILING_DIALOG_LAST_SHOWN = new LongSetting("morphe_spoof_video_streams_client_failing_dialog_last_shown", 0L, false, false);
+    public static final BooleanSetting SPOOF_VIDEO_STREAMS_WEBVIEW_DIALOG = new BooleanSetting("morphe_spoof_video_streams_webview_dialog", TRUE, false, false);
 
     // PoToken provider
     public static final BooleanSetting EXTERNAL_POTOKEN_PROVIDER = new BooleanSetting("morphe_external_potoken_provider", FALSE, true, "morphe_external_potoken_provider_user_dialog_message", new PoTokenProviderAvailability());
+    public static final BooleanSetting EXTERNAL_POTOKEN_PROVIDER_EXPIRED_DIALOG = new BooleanSetting("morphe_external_potoken_provider_expired_dialog", FALSE, false, false);
     public static final LongSetting EXTERNAL_POTOKEN_PROVIDER_EXPIRED_DIALOG_LAST_SHOWN = new LongSetting("morphe_external_potoken_provider_expired_dialog_last_shown", 0L, false, false);
 
     // Downloads
-    public static final EnumSetting<DownloadMode> DOWNLOAD_MODE = new EnumSetting<>("morphe_download_mode", DownloadMode.DEFAULT);
+    public static final EnumSetting<DownloadMode> DOWNLOAD_MODE = new EnumSetting<>("morphe_download_mode", DownloadMode.IN_APP);
     // YouTube only.
     public static final BooleanSetting EXTERNAL_DOWNLOADER_OVERLAY_BUTTON = new BooleanSetting("morphe_external_downloader_overlay_button", FALSE, true);
     // YouTube Music only.
     public static final BooleanSetting EXTERNAL_DOWNLOADER_MENU = new BooleanSetting("morphe_external_downloader_menu", FALSE, DOWNLOAD_MODE.availability(DownloadMode.DEFAULT, DownloadMode.IN_APP));
     public static final StringSetting EXTERNAL_DOWNLOADER_PACKAGE_NAME = new StringSetting("morphe_external_downloader_name", "com.deniscerri.ytdl" /* YTDLnis */, new ExternalDownloaderAvailability());
+    public static final BooleanSetting DOWNLOAD_FORCE_4K = new BooleanSetting("morphe_download_force_4k", FALSE, DOWNLOAD_MODE.availability(DownloadMode.IN_APP));
+    // YouTube only saves videos in the app with these download modes.
+    // YouTube Music also saves songs with smart downloads, with any download mode.
+    public static final StringSetting EXPORT_DOWNLOAD_FOLDER = new StringSetting("morphe_export_download_folder", "",
+            IS_YOUTUBE_MUSIC ? null : DOWNLOAD_MODE.availability(DownloadMode.DEFAULT, DownloadMode.IN_APP));
 
     // Spoof app version
     public static final BooleanSetting SPOOF_APP_VERSION = new BooleanSetting("morphe_spoof_app_version", FALSE, true, "morphe_spoof_app_version_user_dialog_message");
@@ -120,6 +155,12 @@ public class SharedYouTubeSettings extends BaseSettings {
     public static final StringSetting APP_REFRESH_RATE = new StringSetting("morphe_app_refresh_rate", "DEFAULT", true);
     public static final EnumSetting<AppRefreshType> APP_REFRESH_RATE_TYPE = new EnumSetting<>("morphe_app_refresh_rate_type", AppRefreshType.ALWAYS, true, new RefreshRateType());
 
+    // Glass menus
+    public static final BooleanSetting GLASS_MENUS = new BooleanSetting("morphe_glass_menus", FALSE, false, new GlassMenusAvailability());
+    public static final IntegerSetting GLASS_MENUS_OPACITY = new IntegerSetting("morphe_glass_menus_opacity", 30, false, parentsAll(parent(GLASS_MENUS), new GlassMenusAvailability()));
+    public static final IntegerSetting GLASS_MENUS_BLUR = new IntegerSetting("morphe_glass_menus_blur", 24, false, parentsAll(parent(GLASS_MENUS), new GlassMenusAvailability()));
+    public static final IntegerSetting GLASS_MENUS_DIM = new IntegerSetting("morphe_glass_menus_dim", 20, false, parentsAll(parent(GLASS_MENUS), new GlassMenusAvailability()));
+
     // Custom font
     public static final EnumSetting<FontType> CUSTOM_FONT_TYPE = new EnumSetting<>("morphe_custom_font_type", FontType.DEFAULT, true);
     public static final StringSetting CUSTOM_FONT_FILE = new StringSetting("morphe_custom_font_file", "", CUSTOM_FONT_TYPE.availability(FontType.CUSTOM));
@@ -127,7 +168,7 @@ public class SharedYouTubeSettings extends BaseSettings {
     // Return YouTube Dislike
     public static final BooleanSetting RYD_ENABLED = new BooleanSetting("morphe_ryd_enabled", TRUE, true);
     public static final StringSetting RYD_USER_ID = new StringSetting("morphe_ryd_user_id", "", false, false);
-    public static final BooleanSetting RYD_DISLIKE_PERCENTAGE = new BooleanSetting("morphe_ryd_dislike_percentage", FALSE, parent(RYD_ENABLED));
+    public static final BooleanSetting RYD_DISLIKE_PERCENTAGE = new BooleanSetting("morphe_ryd_dislike_percentage", FALSE, true, parent(RYD_ENABLED));
     public static final BooleanSetting RYD_ESTIMATED_LIKE = new BooleanSetting("morphe_ryd_estimated_like", TRUE, true, parent(RYD_ENABLED));
     public static final BooleanSetting RYD_TOAST_ON_CONNECTION_ERROR = new BooleanSetting("morphe_ryd_toast_on_connection_error", TRUE, parent(RYD_ENABLED));
     public static final StringSetting GMS_CORE_IGNORED_VERSION = new StringSetting("morphe_gms_core_update_dialog_ignored_version", "", false, false);
@@ -135,12 +176,49 @@ public class SharedYouTubeSettings extends BaseSettings {
 
     // Migration
     private static final BooleanSetting DEPRECATED_SANITIZE_URL_QUERY = new BooleanSetting("morphe_sanitize_url_query", TRUE);
+    private static final BooleanSetting DEPRECATED_VIDEO_QUALITY_PRIORITIZE = new BooleanSetting("morphe_video_quality_prioritize", TRUE);
+    private static final BooleanSetting DEPRECATED_DISABLE_DRC_AUDIO = new BooleanSetting("morphe_disable_drc_audio", FALSE);
+    private static final BooleanSetting DEPRECATED_DEBUG_PROTOBUFFER = new BooleanSetting("morphe_debug_protobuffer", FALSE, false, false);
+    private static final EnumSetting<SplashScreenAnimationStyle> DEPRECATED_SPLASH_SCREEN_ANIMATION_STYLE = new EnumSetting<>("morphe_splash_screen_animation_style", SplashScreenAnimationStyle.FPS_60_ONE_SECOND);
 
     static {
+        SeekBarPreference.register(new SeekBarConfig(SETTINGS_NEW_INDICATOR_DAYS,
+                0, 14, 1, "", 1, sf("morphe_settings_new_indicator_days_off"), null));
+        SeekBarPreference.register(new SeekBarConfig(GLASS_MENUS_OPACITY,
+                0, 100, 5, "%"));
+        SeekBarPreference.register(new SeekBarConfig(GLASS_MENUS_BLUR,
+                4, 60, 2, "dp"));
+        SeekBarPreference.register(new SeekBarConfig(GLASS_MENUS_DIM,
+                0, 80, 5, "%"));
+
         // TODO: Eventually remove these migrations
         migrateOldSettingToNew(DEPRECATED_SANITIZE_URL_QUERY, SANITIZE_SHARING_LINKS);
+        migrateOldSettingToNew(DEPRECATED_VIDEO_QUALITY_PRIORITIZE, PRIORITIZE_VIDEO_QUALITY);
+        if (DEPRECATED_DISABLE_DRC_AUDIO.get()) {
+            DISABLE_DRC_AUDIO.save(true);
+            DISABLE_LOUDNESS_NORMALIZATION.save(true);
+            DEPRECATED_DISABLE_DRC_AUDIO.resetToDefault();
+        }
+        if (DEPRECATED_DEBUG_PROTOBUFFER.get()) {
+            DEBUG_LITHO.save(LithoLogging.PATH_AND_BUFFER);
+            DEPRECATED_DEBUG_PROTOBUFFER.resetToDefault();
+        }
+
+        // The styles of the original animation used to play the Morphe animation of an icon that has
+        // one, and now always play the original animation. The Morphe styles play the Morphe animation.
+        SplashScreenAnimationStyle splashStyle = DEPRECATED_SPLASH_SCREEN_ANIMATION_STYLE.get();
+        if (!DEPRECATED_SPLASH_SCREEN_ANIMATION_STYLE.isSetToDefault()
+                && EnumSet.range(SplashScreenAnimationStyle.FPS_60_ONE_SECOND,
+                        SplashScreenAnimationStyle.FPS_30_BLACK_AND_WHITE).contains(splashStyle)
+                && CustomBrandingPatch.iconHasStartupAnimation()) {
+            DEPRECATED_SPLASH_SCREEN_ANIMATION_STYLE.save(splashStyle.isMonochrome
+                    ? SplashScreenAnimationStyle.MORPHE_MONOCHROME
+                    : SplashScreenAnimationStyle.MORPHE_COLOR);
+        }
+        migrateOldSettingToNew(DEPRECATED_SPLASH_SCREEN_ANIMATION_STYLE, SPLASH_SCREEN_STYLE);
     }
 
+    @SuppressWarnings("SameReturnValue")
     private static String getDefaultSpoofAppVersionTarget() {
         return ""; // Modified during patching.
     }

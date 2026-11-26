@@ -138,6 +138,7 @@ public final class RedgifsAudioPatch {
     /**
      * @return If this patch was included during patching.
      */
+    @SuppressWarnings("SameReturnValue")
     public static boolean isPatchIncluded() {
         return false;  // Modified during patching.
     }
@@ -172,7 +173,7 @@ public final class RedgifsAudioPatch {
      * <p>
      * The feed is not created from posts, and only the post header has the post url.
      *
-     * @param cellId    Base64 of "MetadataCell-" and the post id.
+     * @param cellId    "MetadataCell-" and the post id, or Base64 of it in older versions.
      * @param mediaPath Post url.
      */
     public static void onFeedMetadataCellCreated(@Nullable String cellId, @Nullable String mediaPath) {
@@ -183,13 +184,24 @@ public final class RedgifsAudioPatch {
             String id = getRedgifsId(mediaPath);
             if (id == null) return;
 
-            String decodedCellId = new String(Base64.decode(cellId, Base64.DEFAULT), StandardCharsets.UTF_8);
-            if (!decodedCellId.startsWith(METADATA_CELL_ID_PREFIX)) return;
+            String decodedCellId = cellId.startsWith(METADATA_CELL_ID_PREFIX)
+                    ? cellId
+                    : decodeBase64CellId(cellId);
+            if (decodedCellId == null || !decodedCellId.startsWith(METADATA_CELL_ID_PREFIX)) return;
 
             postIdToRedgifsId.put(decodedCellId.substring(METADATA_CELL_ID_PREFIX.length()), id);
             getLookup(id);
         } catch (Exception ex) {
             Logger.printException(() -> "onFeedMetadataCellCreated failure", ex);
+        }
+    }
+
+    @Nullable
+    private static String decodeBase64CellId(String cellId) {
+        try {
+            return new String(Base64.decode(cellId, Base64.DEFAULT), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException ex) {
+            return null;
         }
     }
 
@@ -260,6 +272,7 @@ public final class RedgifsAudioPatch {
 
             Lookup lookup = getLookup(path.substring(PLACEHOLDER_PATH.length(), path.length() - ".mp4".length()));
             if (!Utils.isCurrentlyOnMainThread()) {
+                //noinspection ResultOfMethodCallIgnored
                 lookup.done.await(PLAYER_WAIT_MS, TimeUnit.MILLISECONDS);
             }
 
@@ -271,7 +284,7 @@ public final class RedgifsAudioPatch {
 
             return url == null ? uri : Uri.parse(url);
         } catch (InterruptedException ex) {
-            // The player cancelled the load.
+            // The player canceled the load.
             Logger.printDebug(() -> "Redgifs placeholder resolve interrupted: " + uri);
             Thread.currentThread().interrupt();
         } catch (Exception ex) {
@@ -303,6 +316,7 @@ public final class RedgifsAudioPatch {
             // Downloads are usually enqueued on the main thread, where the lookup can't be awaited.
             // It started when the post was loaded, so it's usually done by now.
             if (!Utils.isCurrentlyOnMainThread()) {
+                //noinspection ResultOfMethodCallIgnored
                 lookup.done.await(DOWNLOAD_WAIT_MS, TimeUnit.MILLISECONDS);
             }
 
@@ -406,8 +420,8 @@ public final class RedgifsAudioPatch {
     private static void fetchUrl(Lookup lookup) {
         try {
             JSONObject urls = fetchGif(lookup.id).getJSONObject("urls");
-            lookup.sdUrl = urls.optString("sd", null);
-            lookup.hdUrl = urls.optString("hd", null);
+            lookup.sdUrl = urls.has("sd") ? urls.optString("sd") : null;
+            lookup.hdUrl = urls.has("hd") ? urls.optString("hd") : null;
         } catch (Exception ex) {
             Logger.printInfo(() -> "Redgifs lookup failed: " + lookup.id, ex);
         } finally {

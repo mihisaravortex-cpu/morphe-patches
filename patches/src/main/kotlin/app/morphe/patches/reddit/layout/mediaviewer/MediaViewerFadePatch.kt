@@ -10,17 +10,19 @@ package app.morphe.patches.reddit.layout.mediaviewer
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.p0Register
+import app.morphe.patcher.util.registersUsed
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.reddit.misc.settings.settingsPatch
 import app.morphe.patches.reddit.misc.version.is_2026_24_0_or_greater
+import app.morphe.patches.reddit.misc.version.is_2026_37_0_or_greater
 import app.morphe.patches.reddit.misc.version.is_2026_38_0_or_greater
+import app.morphe.patches.reddit.misc.version.is_2026_45_0_or_greater
 import app.morphe.patches.reddit.misc.version.versionCheckPatch
 import app.morphe.patches.reddit.shared.Constants.COMPATIBILITY_REDDIT
-import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
-import app.morphe.util.p0Register
-import app.morphe.util.registersUsed
 import app.morphe.util.setExtensionIsPatchIncluded
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import java.util.logging.Logger
@@ -31,7 +33,7 @@ private const val EXTENSION_CLASS =
 private const val SCRIM_STYLE_CLASS = "Lcom/reddit/fullbleedplayer/FbpChromeScrimStyle;"
 
 @Suppress("unused")
-val mediaViewerFadePatch = bytecodePatch(
+val mediaViewerFadePatch = patch(
     name = "Media viewer fade",
     description = "Adds an option to lower or remove the dark fade behind the caption when viewing images and videos."
 ) {
@@ -64,6 +66,23 @@ val mediaViewerFadePatch = bytecodePatch(
                     """
                 )
             }
+        } else if (is_2026_37_0_or_greater) {
+            // The last boolean parameter replaces the legacy gradient with two darker static gradients.
+            MediaViewerChromeFingerprint.method.apply {
+                // The method is static and has no wide parameters.
+                val darkerFadeRegister = p0Register + parameterTypes.indexOfLast { it.toString() == "Z" }
+                addInstructionsWithLabels(
+                    0,
+                    """
+                        invoke-static { }, $EXTENSION_CLASS->useLegacyFadeStyle()Z
+                        move-result v0
+                        if-eqz v0, :keep_fade_style
+                        const/16 v$darkerFadeRegister, 0x0
+                        :keep_fade_style
+                        nop
+                    """
+                )
+            }
         } else {
             // Reddit can swap in a darker static gradient right after building the default one.
             MediaViewerChromeLegacyFingerprint.let {
@@ -87,10 +106,17 @@ val mediaViewerFadePatch = bytecodePatch(
 
         // The fade is a vertical gradient built from an array of (position, color) pairs.
         // Each color stop is made with Color.copy(alpha).
+        // The call is copy(float, long) or before 2026.45.0 it's copy(long, float),
+        // where the long uses 2 registers before the alpha.
+        val (alphaFilter, alphaRegisterIndex) = if (is_2026_45_0_or_greater) {
+            mediaViewerFadeAlphaFilter to 0
+        } else {
+            mediaViewerFadeAlphaLegacyFilter to 2
+        }
+
         MediaViewerChromeFingerprint.method.apply {
-            findInstructionIndicesReversedOrThrow(mediaViewerFadeAlphaFilter).forEach { index ->
-                // Color.copy(long, float): the long uses 2 registers, then the alpha.
-                val alphaRegister = getInstruction(index).registersUsed[2]
+            findInstructionIndicesReversedOrThrow(alphaFilter).forEach { index ->
+                val alphaRegister = getInstruction(index).registersUsed[alphaRegisterIndex]
 
                 addInstructions(
                     index,

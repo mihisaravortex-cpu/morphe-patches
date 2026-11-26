@@ -15,25 +15,15 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.requests.Requester;
-import app.morphe.extension.shared.settings.BaseSettings;
 
 public class EditPlaylistRequest {
-    private static final int MAX_MILLISECONDS_TO_WAIT_FOR_FETCH = 20 * 1000;
-
-    public static final Map<String, EditPlaylistRequest> cache = Collections.synchronizedMap(
-            Utils.createSizeRestrictedMap(50));
-
     private final Future<String> future;
 
     private EditPlaylistRequest(
@@ -47,49 +37,16 @@ public class EditPlaylistRequest {
 
     @Nullable
     public String getResult() {
-        try {
-            if (BaseSettings.DEBUG.get() && !future.isDone() && Utils.isCurrentlyOnMainThread()) {
-                Logger.printException(() -> "Debug: Blocking main thread");
-            }
-            return future.get(MAX_MILLISECONDS_TO_WAIT_FOR_FETCH, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException ex) {
-            Logger.printInfo(() -> "getResult timed out", ex);
-        } catch (InterruptedException ex) {
-            Logger.printException(() -> "getResult interrupted", ex);
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException ex) {
-            Logger.printException(() -> "getResult failure", ex);
-        }
-        return null;
+        return PlaylistRoutes.getResult(future, "getResult");
     }
 
-    public static void clear() {
-        cache.clear();
-    }
-
-    public static void clearVideoId(String videoId) {
-        cache.remove(videoId);
-    }
-
-    public static void fetchRequestIfNeeded(
+    public static EditPlaylistRequest fetchRequestIfNeeded(
             String videoId,
             String playlistId,
             @Nullable String setVideoId,
             Map<String, String> requestHeader
     ) {
-        cache.computeIfAbsent(
-                Objects.requireNonNull(videoId),
-                k -> new EditPlaylistRequest(k, playlistId, setVideoId, requestHeader)
-        );
-    }
-
-    @Nullable
-    public static EditPlaylistRequest getRequestForVideoId(String videoId) {
-        return cache.get(videoId);
-    }
-
-    private static void handleConnectionError(String toastMessage, @Nullable Exception ex) {
-        Logger.printInfo(() -> toastMessage, ex);
+        return new EditPlaylistRequest(Objects.requireNonNull(videoId), playlistId, setVideoId, requestHeader);
     }
 
     @Nullable
@@ -107,7 +64,15 @@ public class EditPlaylistRequest {
                 ", playlistId: " + playlistId + ", setVideoId: " + setVideoId);
 
         try {
-            byte[] requestBody = PlaylistRoutes.editPlaylistBody(videoId, playlistId, setVideoId);
+            return sendRequest(PlaylistRoutes.editPlaylistBody(videoId, playlistId, setVideoId), requestHeader);
+        } finally {
+            Logger.printDebug(() -> "video: " + videoId + " took: " + (System.currentTimeMillis() - startTime) + "ms");
+        }
+    }
+
+    @Nullable
+    private static JSONObject sendRequest(byte[] requestBody, Map<String, String> requestHeader) {
+        try {
             HttpURLConnection connection = PlaylistRoutes.getConnection(PlaylistRoutes.EDIT_PLAYLIST, requestHeader);
             connection.setFixedLengthStreamingMode(requestBody.length);
             connection.getOutputStream().write(requestBody);
@@ -115,17 +80,36 @@ public class EditPlaylistRequest {
             if (responseCode == Requester.HTTP_STATUS_CODE_SUCCESS) {
                 return Requester.parseJSONObject(connection);
             }
-            handleConnectionError("Edit playlist failed with code: " + responseCode, null);
+            PlaylistRoutes.handleConnectionError("Edit playlist failed with code: " + responseCode, null);
         } catch (SocketTimeoutException ex) {
-            handleConnectionError("Connection timeout", ex);
+            PlaylistRoutes.handleConnectionError("Connection timeout", ex);
         } catch (IOException ex) {
-            handleConnectionError("Network error", ex);
+            PlaylistRoutes.handleConnectionError("Network error", ex);
         } catch (Exception ex) {
             Logger.printException(() -> "sendRequest failed", ex);
-        } finally {
-            Logger.printDebug(() -> "video: " + videoId + " took: " + (System.currentTimeMillis() - startTime) + "ms");
         }
         return null;
+    }
+
+    /**
+     * Moves an entry of a playlist. Must be called off the main thread.
+     *
+     * @param predecessorSetVideoId The entry to move the video after,
+     *                              or null to move the video to the start of the playlist.
+     */
+    public static void moveVideo(
+            String playlistId,
+            String setVideoId,
+            @Nullable String predecessorSetVideoId,
+            Map<String, String> requestHeader
+    ) {
+        Utils.verifyOffMainThread();
+        JSONObject json = sendRequest(PlaylistRoutes.moveVideoBody(playlistId, setVideoId, predecessorSetVideoId),
+                requestHeader);
+        if (json != null && "STATUS_SUCCEEDED".equals(json.optString("status"))) {
+            return;
+        }
+        Logger.printInfo(() -> "Could not move video in playlist: " + json);
     }
 
     @Nullable

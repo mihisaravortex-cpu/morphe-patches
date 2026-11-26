@@ -1,20 +1,22 @@
 package android.support.v7.widget;
 
 import android.content.Context;
-import android.view.View;
+import android.view.ViewGroup;
 
-public class RecyclerView extends View {
+@SuppressWarnings("unused")
+public class RecyclerView extends ViewGroup {
 
     public RecyclerView(Context context) {
         super(context);
         throw new UnsupportedOperationException("Stub");
     }
 
-    public View getChildAt(@SuppressWarnings("unused") final int index) {
-        return null;
+    @Override
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
     }
 
-    public int getChildCount() {
+    @Override
+    public int computeHorizontalScrollOffset() {
         return 0;
     }
 }

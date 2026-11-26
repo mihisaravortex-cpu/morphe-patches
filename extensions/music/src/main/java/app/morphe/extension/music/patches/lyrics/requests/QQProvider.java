@@ -20,10 +20,12 @@ import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,8 +35,9 @@ import app.morphe.extension.music.patches.lyrics.model.LyricsMerge;
 import app.morphe.extension.music.patches.lyrics.model.TrackInfo;
 import app.morphe.extension.music.patches.lyrics.model.Word;
 import app.morphe.extension.music.patches.lyrics.parsers.LRCParser;
-import app.morphe.extension.music.patches.lyrics.parsers.LyricsCrypto;
+import app.morphe.extension.music.patches.lyrics.utils.LyricsCrypto;
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.requests.Requester;
 
 /**
@@ -44,7 +47,15 @@ import app.morphe.extension.shared.requests.Requester;
 public final class QQProvider implements LyricsProvider {
 
     private static final String MUSICU_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+    private static final String SHU6_URL = "https://shu6.y.qq.com/cgi-bin/musicu.fcg";
+    private static final String WEB_SEARCH_URL = "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp";
     private static final String QRC_KEY = "!@#)(*$%123ZXC!@!@#)(NHL";
+    private static final Pattern QRC_XML = Pattern.compile(
+            "<Lyric_1 LyricType=\"1\" LyricContent=\"([\\s\\S]*?)\"/>");
+    private static final Pattern NUMERIC_ENTITY = Pattern.compile("&#(\\d+);");
+    private static final Pattern QRC_LINE = Pattern.compile("^\\[(\\d+),(\\d+)](.*)");
+    private static final Pattern QRC_WORD = Pattern.compile("\\((\\d+),(\\d+)\\)");
+    private static final Pattern QRC_WHOLE_LINE_COMMENT = Pattern.compile("//");
 
     private static JSONObject musicuComm() throws JSONException {
         JSONObject comm = new JSONObject();
@@ -56,129 +67,6 @@ public final class QQProvider implements LyricsProvider {
         comm.put("tmeAppID", "qqmusiclight");
         comm.put("nettype", "NETWORK_WIFI");
         return comm;
-    }
-
-    private static final Pattern QRC_XML = Pattern.compile(
-            "<Lyric_1 LyricType=\"1\" LyricContent=\"([\\s\\S]*?)\"/>");
-    private static final Pattern NUMERIC_ENTITY = Pattern.compile("&#(\\d+);");
-    private static final Pattern QRC_LINE = Pattern.compile("^\\[(\\d+),(\\d+)](.*)");
-    private static final Pattern QRC_WORD = Pattern.compile("\\((\\d+),(\\d+)\\)");
-    private static final Pattern QRC_WHOLE_LINE_COMMENT = Pattern.compile("//");
-
-    @Override
-    public String name() {
-        return "QQ";
-    }
-
-    @Override
-    public boolean hasCandidates() {
-        return true;
-    }
-
-    @Nullable
-    @Override
-    public FetchResult fetch(TrackInfo track) throws Exception {
-        String keyword = track.title() + " " + track.artist();
-        JSONObject song = searchBest(keyword, track);
-        if (song == null || !song.has("id")) {
-            return null;
-        }
-        Lyrics lyrics = fetchFromSong(song);
-        if (lyrics == null) {
-            return null;
-        }
-        return FetchResult.of(lyrics,
-                song.optString("title", ""),
-                singers(song),
-                song.optInt("interval", 0),
-                track);
-    }
-
-    @Override
-    public List<Lyrics.ScoredLyrics> fetchCandidates(TrackInfo track) throws Exception {
-        String keyword = track.title() + " " + track.artist();
-        List<JSONObject> candidates = searchAll(keyword, track);
-
-        List<Lyrics.ScoredLyrics> scored = new ArrayList<>();
-        for (JSONObject song : candidates) {
-            if (scored.size() >= LyricsRequests.MAX_CANDIDATES) {
-                break;
-            }
-            if (song == null || !song.has("id")) {
-                continue;
-            }
-            try {
-                Lyrics lyrics = fetchFromSong(song);
-                if (lyrics != null) {
-                    int score = LyricsRequests.scoreLyricsCandidate(
-                            song.optString("title", ""), singers(song),
-                            song.optInt("interval", 0), lyrics, track);
-                    scored.add(new Lyrics.ScoredLyrics(score, lyrics));
-                }
-            } catch (Exception ex) {
-                Logger.printDebug(() -> "Could not fetch QQ lyrics for a song", ex);
-            }
-        }
-
-        return Lyrics.sortScoredByScore(scored);
-    }
-
-    @Nullable
-    private Lyrics fetchFromSong(JSONObject song) throws Exception {
-        JSONObject data = fetchLyricData(song);
-        if (data == null) {
-            return null;
-        }
-
-        final long songId = song.optLong("id");
-        final String sourceUrl = "https://y.qq.com/n/ryqq/songDetail/" + songId;
-
-        String original = decodeQqLyricPayload(data.optString("lyric", ""));
-        Matcher qrcXmlMatcher = QRC_XML.matcher(original);
-        if (qrcXmlMatcher.find()) {
-            original = decodeXmlEntities(qrcXmlMatcher.group(1));
-        }
-
-        long[] offsetHolder = new long[1];
-        List<String> qrcMetadata = parseQrcMetadata(original, offsetHolder);
-        long qrcOffsetMs = offsetHolder[0];
-
-        List<LyricsLine> lines = parseQrcFormat(original);
-        if (lines.isEmpty()) {
-            lines = LRCParser.parseSynced(original);
-        }
-        if (lines.isEmpty()) {
-            return null;
-        }
-
-        if (qrcOffsetMs != 0) {
-            lines = LyricsRequests.applyOffset(lines, qrcOffsetMs);
-        }
-
-        if (lines.isEmpty()) {
-            return null;
-        }
-
-        String romaPayload = decodeQqLyricPayload(data.optString("roma", ""));
-        List<LyricsLine> romaLines = romaPayload.isEmpty() ? null : parseQrcFormat(romaPayload);
-        List<LyricsLine> romanization = LyricsMerge.mergeRomanization(lines, romaLines);
-
-        // QQ writes this translation itself, in the Chinese the mainland uses.
-        Map<String, List<LyricsLine>> translations = null;
-        if (LyricsRequests.isSimplifiedChinese()) {
-            String transPayload = decodeQqLyricPayload(data.optString("trans", ""));
-            List<LyricsLine> transLines = transPayload.isEmpty() ? null : parseQrcFormat(transPayload);
-            if (transLines == null || transLines.isEmpty()) {
-                transLines = LRCParser.parseSynced(transPayload);
-            }
-            transLines.removeIf(line -> "//".equals(line.text().trim()));
-            List<LyricsLine> translation = LyricsMerge.mergeRomanization(lines, transLines);
-            translations = LyricsMerge.singleLanguageTranslations(
-                    translation, LyricsRequests.SIMPLIFIED_CHINESE);
-        }
-
-        return new Lyrics(lines, name(), true, romanization, translations, null,
-                qrcMetadata.isEmpty() ? null : qrcMetadata, original, "qrc", sourceUrl);
     }
 
     @Nullable
@@ -199,10 +87,33 @@ public final class QQProvider implements LyricsProvider {
         return best;
     }
 
-    private static List<JSONObject> searchAll(String keyword, TrackInfo track)
-            throws IOException, JSONException {
-        JSONObject comm = musicuComm();
+    /** Asks the two musicu hosts, then the web search, and keeps the first that has results. */
+    private static List<JSONObject> searchAll(String keyword, TrackInfo track) {
+        for (String url : new String[]{MUSICU_URL, SHU6_URL}) {
+            try {
+                JSONArray songs = musicuSearch(url, keyword);
+                if (songs != null && songs.length() > 0) {
+                    return softGateSort(expandGrpTree(songs), track);
+                }
+            } catch (Exception ex) {
+                Logger.printDebug(() -> "QQ search failed: " + url, ex);
+            }
+        }
 
+        try {
+            JSONArray songs = webSearch(keyword);
+            if (songs != null && songs.length() > 0) {
+                return softGateSort(expandGrpTree(songs), track);
+            }
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "QQ web search failed", ex);
+        }
+        return new ArrayList<>();
+    }
+
+    @Nullable
+    private static JSONArray musicuSearch(String url, String keyword) throws IOException, JSONException {
+        JSONObject comm = musicuComm();
         JSONObject param = new JSONObject();
         param.put("search_id", System.currentTimeMillis());
         param.put("remoteplace", "search.android.keyboard");
@@ -224,27 +135,74 @@ public final class QQProvider implements LyricsProvider {
         payload.put("comm", comm);
         payload.put("req_0", req0);
 
-        HttpURLConnection connection = LyricsRequests.postJson(MUSICU_URL, payload.toString());
+        HttpURLConnection connection = LyricsRequests.postJson(url, payload.toString());
         if (connection.getResponseCode() != Requester.HTTP_STATUS_CODE_SUCCESS) {
             LyricsRequests.logFailure("QQ", connection);
-            return new ArrayList<>();
+            return null;
         }
-
         JSONObject response = Requester.parseJSONObject(connection);
         JSONObject body = LyricsRequests.optPath(response, "req_0", "data", "body");
-        JSONArray songs = body == null ? null : body.optJSONArray("item_song");
-        if (songs == null || songs.length() == 0) {
-            return new ArrayList<>();
-        }
+        return body == null ? null : body.optJSONArray("item_song");
+    }
 
-        List<JSONObject> scored = new ArrayList<>();
-        for (int i = 0; i < songs.length(); i++) {
-            JSONObject item = songs.optJSONObject(i);
-            if (item != null) {
-                scored.add(item);
-            }
+    @Nullable
+    private static JSONArray webSearch(String keyword) throws IOException, JSONException {
+        String url = WEB_SEARCH_URL + "?format=json&aggr=1&w=" + LyricsRequests.encode(keyword)
+                + "&n=5&p=1";
+        HttpURLConnection connection = LyricsRequests.openConnection(url, Map.of(
+                "Referer", "https://y.qq.com/",
+                "User-Agent", "Mozilla/5.0"));
+        if (connection.getResponseCode() != Requester.HTTP_STATUS_CODE_SUCCESS) {
+            LyricsRequests.logFailure("QQ", connection);
+            return null;
         }
-        return softGateSort(scored, track);
+        JSONObject root = Requester.parseJSONObject(connection);
+        JSONObject data = root.optJSONObject("data");
+        JSONObject song = data == null ? null : data.optJSONObject("song");
+        JSONArray list = song == null ? null : song.optJSONArray("list");
+        if (list == null) return null;
+
+        JSONArray normalized = new JSONArray();
+        for (int i = 0; i < list.length(); i++) {
+            JSONObject raw = list.optJSONObject(i);
+            if (raw == null) continue;
+            JSONObject item = new JSONObject();
+            item.put("id", raw.optLong("songid"));
+            item.put("mid", raw.optString("songmid", ""));
+            item.put("title", raw.optString("songname", ""));
+            item.put("singer", raw.optJSONArray("singer"));
+            JSONObject album = new JSONObject();
+            album.put("name", raw.optString("albumname", ""));
+            album.put("mid", raw.optString("albummid", ""));
+            item.put("album", album);
+            item.put("interval", raw.optInt("interval", 0));
+            JSONArray grp = raw.optJSONArray("grp");
+            if (grp != null) item.put("grp", grp);
+            normalized.put(item);
+        }
+        return normalized;
+    }
+
+    private static List<JSONObject> expandGrpTree(JSONArray items) {
+        List<JSONObject> result = new ArrayList<>();
+        Set<Long> seen = new HashSet<>();
+        for (int i = 0; i < items.length(); i++) {
+            collectGrpNodes(items.optJSONObject(i), result, seen);
+        }
+        return result;
+    }
+
+    private static void collectGrpNodes(JSONObject node, List<JSONObject> out, Set<Long> seen) {
+        if (node == null) return;
+        long id = node.optLong("id", -1);
+        if (id <= 0 || seen.contains(id)) return;
+        seen.add(id);
+        out.add(node);
+        JSONArray grp = node.optJSONArray("grp");
+        if (grp == null || grp.length() == 0) return;
+        for (int i = 0; i < grp.length(); i++) {
+            collectGrpNodes(grp.optJSONObject(i), out, seen);
+        }
     }
 
     private static int scoreCandidate(JSONObject item, TrackInfo track) {
@@ -281,8 +239,7 @@ public final class QQProvider implements LyricsProvider {
             }
             String name = singer.optString("name", "");
             if (!name.isEmpty()) {
-                //noinspection SizeReplaceableByIsEmpty
-                if (builder.length() > 0) {
+                if (Utils.isNotEmpty(builder)) {
                     builder.append('/');
                 }
                 builder.append(name);
@@ -511,5 +468,122 @@ public final class QQProvider implements LyricsProvider {
 
         lines.sort(Comparator.comparingLong(LyricsLine::startTimeMs));
         return lines;
+    }
+
+    @Override
+    public String name() {
+        return "QQ";
+    }
+
+    @Override
+    public boolean hasCandidates() {
+        return true;
+    }
+
+    @Nullable
+    @Override
+    public FetchResult fetch(TrackInfo track) throws Exception {
+        String keyword = track.title() + " " + track.artist();
+        JSONObject song = searchBest(keyword, track);
+        if (song == null || !song.has("id")) {
+            return null;
+        }
+        Lyrics lyrics = fetchFromSong(song);
+        if (lyrics == null) {
+            return null;
+        }
+        return FetchResult.of(lyrics,
+                song.optString("title", ""),
+                singers(song),
+                song.optInt("interval", 0),
+                track);
+    }
+
+    @Override
+    public List<Lyrics.ScoredLyrics> fetchCandidates(TrackInfo track) throws Exception {
+        String keyword = track.title() + " " + track.artist();
+        List<JSONObject> candidates = searchAll(keyword, track);
+
+        List<Lyrics.ScoredLyrics> scored = new ArrayList<>();
+        for (JSONObject song : candidates) {
+            if (scored.size() >= LyricsRequests.MAX_CANDIDATES) {
+                break;
+            }
+            if (song == null || !song.has("id")) {
+                continue;
+            }
+            try {
+                Lyrics lyrics = fetchFromSong(song);
+                if (lyrics != null) {
+                    int score = LyricsRequests.scoreLyricsCandidate(
+                            song.optString("title", ""), singers(song),
+                            song.optInt("interval", 0), lyrics, track);
+                    scored.add(new Lyrics.ScoredLyrics(score, lyrics));
+                }
+            } catch (Exception ex) {
+                Logger.printDebug(() -> "Could not fetch QQ lyrics for a song", ex);
+            }
+        }
+
+        return Lyrics.sortScoredByScore(scored);
+    }
+
+    @Nullable
+    private Lyrics fetchFromSong(JSONObject song) throws Exception {
+        JSONObject data = fetchLyricData(song);
+        if (data == null) {
+            return null;
+        }
+
+        final long songId = song.optLong("id");
+        final String sourceUrl = "https://y.qq.com/n/ryqq/songDetail/" + songId;
+
+        String original = decodeQqLyricPayload(data.optString("lyric", ""));
+        Matcher qrcXmlMatcher = QRC_XML.matcher(original);
+        if (qrcXmlMatcher.find()) {
+            original = decodeXmlEntities(qrcXmlMatcher.group(1));
+        }
+
+        long[] offsetHolder = new long[1];
+        List<String> qrcMetadata = parseQrcMetadata(original, offsetHolder);
+        long qrcOffsetMs = offsetHolder[0];
+
+        List<LyricsLine> lines = parseQrcFormat(original);
+        if (lines.isEmpty()) {
+            lines = LRCParser.parseSynced(original);
+        }
+        if (lines.isEmpty()) {
+            return null;
+        }
+
+        if (qrcOffsetMs != 0) {
+            lines = LyricsRequests.applyOffset(lines, qrcOffsetMs);
+        }
+
+        if (lines.isEmpty()) {
+            return null;
+        }
+
+        String romaPayload = decodeQqLyricPayload(data.optString("roma", ""));
+        List<LyricsLine> romaLines = romaPayload.isEmpty() ? null : parseQrcFormat(romaPayload);
+        List<LyricsLine> romanization = LyricsMerge.mergeRomanization(lines, romaLines);
+
+        // QQ writes this translation itself, in the Chinese the mainland uses.
+        Map<String, List<LyricsLine>> translations = null;
+        if (LyricsRequests.isSimplifiedChinese()) {
+            String transPayload = decodeQqLyricPayload(data.optString("trans", ""));
+            List<LyricsLine> transLines = transPayload.isEmpty() ? null : parseQrcFormat(transPayload);
+            if (transLines == null || transLines.isEmpty()) {
+                transLines = LRCParser.parseSynced(transPayload);
+            }
+            transLines.removeIf(line -> "//".equals(line.text().trim()));
+            List<LyricsLine> translation = LyricsMerge.mergeRomanization(lines, transLines);
+            translations = LyricsMerge.singleLanguageTranslations(
+                    translation, LyricsRequests.SIMPLIFIED_CHINESE);
+        }
+
+        return new Lyrics(lines, name(), true, romanization, translations, null,
+                null, qrcMetadata.isEmpty() ? null : qrcMetadata, original, "qrc", sourceUrl,
+                null, null);
     }
 }

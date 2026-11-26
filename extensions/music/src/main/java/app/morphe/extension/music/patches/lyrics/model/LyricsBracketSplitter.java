@@ -15,7 +15,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
-import app.morphe.extension.music.patches.lyrics.TextTrim;
+import app.morphe.extension.music.patches.lyrics.romanizers.ScriptDetector;
+import app.morphe.extension.music.patches.lyrics.utils.TextTrim;
+import app.morphe.extension.shared.Utils;
 
 public final class LyricsBracketSplitter {
 
@@ -23,12 +25,6 @@ public final class LyricsBracketSplitter {
 
     private static final Pattern NOT_SUNG_RUN = Pattern.compile(
             "(?i)\\s*(?:x\\s*\\d+|\\d+\\s*x|repeat|chorus|verse|pre\\s*chorus|post\\s*chorus)\\s*");
-
-    private record Run(int open, int close) {
-    }
-
-    private record Cut(LyricsLine sung, LyricsLine background) {
-    }
 
     private LyricsBracketSplitter() {
     }
@@ -65,8 +61,8 @@ public final class LyricsBracketSplitter {
                 widen(lyrics.romanization(), count, room),
                 widen(lyrics.translations(), count, room),
                 widen(lyrics.romanizations(), count, room),
-                lyrics.songwriters(), lyrics.rawFormat(), lyrics.formatType(),
-                lyrics.sourceUrl(), lyrics.about());
+                lyrics.songwriters(), lyrics.credits(), lyrics.rawFormat(),
+                lyrics.formatType(), lyrics.sourceUrl(), lyrics.about(), lyrics.agentNames());
     }
 
     /** Reading brackets on top of a stated split would put two background lines under one sung line. */
@@ -122,7 +118,7 @@ public final class LyricsBracketSplitter {
                 inBackground += Math.max(0, to - Math.max(from, tail.open()));
             }
 
-            if (inSung <= 0 && inBackground <= 0) {
+            if (inSung == 0 && inBackground == 0) {
                 continue;
             }
             // Halving a straddling word would cost it its timing, so it goes whole to the bigger side.
@@ -158,7 +154,7 @@ public final class LyricsBracketSplitter {
             backgroundText.append(text, head.open() + 1, head.close());
         }
         if (tail != null) {
-            if (backgroundText.length() > 0) {
+            if (Utils.isNotEmpty(backgroundText)) {
                 backgroundText.append(' ');
             }
             backgroundText.append(text, tail.open() + 1, tail.close());
@@ -220,12 +216,15 @@ public final class LyricsBracketSplitter {
             }
             final Word word = words.get(i);
             out.add(new Word(word.startMs(), word.endMs(), body,
-                    word.romaji(), body.endsWith(" ")));
+                    word.romaji(), body.endsWith(" "), word.ruby()));
         }
         return out;
     }
 
-    /** A run running straight into a word is not a vocal of its own. */
+    /**
+     * A run running straight into a word is not a vocal of its own, unless the script has no
+     * spaces between words.
+     */
     @Nullable
     private static Run headRun(String text) {
         int open = 0;
@@ -239,9 +238,11 @@ public final class LyricsBracketSplitter {
         if (run == null) {
             return null;
         }
+        final int after = run.close() + 1;
         return isWide(text.charAt(run.open()))
-                || run.close() + 1 == text.length()
-                || Character.isWhitespace(text.charAt(run.close() + 1)) ? run : null;
+                || after == text.length()
+                || Character.isWhitespace(text.charAt(after))
+                || ScriptDetector.isUnspacedCodePoint(text.codePointAt(after)) ? run : null;
     }
 
     @Nullable
@@ -259,7 +260,8 @@ public final class LyricsBracketSplitter {
         }
         return isWide(text.charAt(run.open()))
                 || run.open() == 0
-                || Character.isWhitespace(text.charAt(run.open() - 1)) ? run : null;
+                || Character.isWhitespace(text.charAt(run.open() - 1))
+                || ScriptDetector.isUnspacedCodePoint(text.codePointBefore(run.open())) ? run : null;
     }
 
     /** A full-width bracket stands on a cell of its own, so it needs no space around it. */
@@ -267,7 +269,7 @@ public final class LyricsBracketSplitter {
         return c == '（' || c == '）';
     }
 
-    /** Nesting is counted so an inner bracket does not close the run early; "(oh]" is no run at all. */
+    /** Nesting is counted so an inner bracket does not close the run early; "(oh]" is a no run at all. */
     @Nullable
     private static Run match(String text, int from, int toward, boolean forward) {
         final char first = text.charAt(from);
@@ -302,22 +304,23 @@ public final class LyricsBracketSplitter {
     }
 
     private static char closerOf(char open) {
-        switch (open) {
-            case '(': return ')';
-            case '（': return '）';
-            default: return 0;
-        }
+        return switch (open) {
+            case '(' -> ')';
+            case '（' -> '）';
+            default -> 0;
+        };
     }
 
     private static char openerOf(char close) {
-        switch (close) {
-            case ')': return '(';
-            case '）': return '（';
-            default: return 0;
-        }
+        return switch (close) {
+            case ')' -> '(';
+            case '）' -> '（';
+            default -> 0;
+        };
     }
 
     /** A repeat count or section name is bracketed too, but it is not sung. */
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     private static boolean sung(String text) {
         if (text == null) {
             return false;
@@ -350,8 +353,10 @@ public final class LyricsBracketSplitter {
         return total;
     }
 
-    /** A track written against other lines stays as it is: shorter than the lyrics is the mismatch
- *  the readers already check for before trusting one. */
+    /**
+     * A track written against other lines stays as it is: shorter than the lyrics is the mismatch
+     * the readers already check for before trusting one.
+     */
     @Nullable
     private static List<LyricsLine> widen(@Nullable List<LyricsLine> aligned, int count,
                                           int[] room) {
@@ -379,5 +384,63 @@ public final class LyricsBracketSplitter {
             out.put(entry.getKey(), widen(entry.getValue(), count, room));
         }
         return out;
+    }
+
+    /** Lenticular brackets hold a title or credit tag, never a vocal. */
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
+    public static boolean hasTagBrackets(String text) {
+        return text.indexOf('【') >= 0 || text.indexOf('】') >= 0;
+    }
+
+    /** A whole line in round brackets, which is how a background vocal is usually written. */
+    public static boolean isBracketedVocal(@Nullable String text) {
+        return text != null && !hasTagBrackets(text) && hasBalancedOuterBrackets(text);
+    }
+
+    public static boolean hasBalancedOuterBrackets(@Nullable String text) {
+        if (text == null) {
+            return false;
+        }
+        final String trimmed = text.trim();
+        if (trimmed.length() < 2) {
+            return false;
+        }
+        final char first = trimmed.charAt(0);
+        if (!isOpen(first)) {
+            return false;
+        }
+        final Run matched = match(trimmed, 0, trimmed.length(), true);
+        return matched != null && matched.close() == trimmed.length() - 1;
+    }
+
+    public static String stripOuterBrackets(@Nullable String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        String trimmed = text.trim();
+        while (trimmed.length() >= 2 && hasBalancedOuterBrackets(trimmed)) {
+            trimmed = trimmed.substring(1, trimmed.length() - 1).trim();
+        }
+        return trimmed;
+    }
+
+    public static String stripAllBrackets(@Nullable String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        final StringBuilder sb = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            final char c = text.charAt(i);
+            if (!isOpen(c) && !isClose(c)) {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private record Run(int open, int close) {
+    }
+
+    private record Cut(LyricsLine sung, LyricsLine background) {
     }
 }

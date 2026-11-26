@@ -12,40 +12,54 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 
+import androidx.annotation.NonNull;
+
 import org.junit.Test;
 
 import java.text.Collator;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 import app.morphe.extension.youtube.patches.AutoTranslateCaptionsPatch.CaptionTrackInterface;
 
 public class AutoTranslateCaptionsPatchTest {
     private static final String URL = "https://www.youtube.com/api/timedtext?v=video&lang=en&sig=a%2Bb";
 
-    private static final class Track implements CaptionTrackInterface {
-        final String code, url, vss, label;
+    private record Track(String code, String url, String vss,
+                         String label) implements CaptionTrackInterface {
+            Track(String code, String label) {
+                this(code, URL + "&tlang=" + code, "ta.en." + code, label);
+            }
 
-        Track(String code, String label) {
-            this(code, URL + "&tlang=" + code, "ta.en." + code, label);
+        @Override
+        public String patch_getLanguageCode() {
+            return code;
         }
 
-        Track(String code, String url, String vss, String label) {
-            this.code = code;
-            this.url = url;
-            this.vss = vss;
-            this.label = label;
+        @Override
+        public String patch_getVssId() {
+            return vss;
         }
 
-        @Override public String patch_getLanguageCode() { return code; }
-        @Override public String patch_getVssId() { return vss; }
-        @Override public String patch_getUrl() { return url; }
-        @Override public CaptionTrackInterface patch_copyTranslation(
-                String languageCode, String url, String vssId, CharSequence label) {
-            return new Track(languageCode, url, vssId, label.toString());
+        @Override
+        public String patch_getUrl() {
+            return url;
         }
-        @Override public String toString() { return label; }
-    }
+
+        @Override
+        public CaptionTrackInterface patch_copyTranslation(
+                    String languageCode, String url, String vssId, CharSequence label) {
+                return new Track(languageCode, url, vssId, label.toString());
+            }
+
+        @NonNull
+        @Override
+        public String toString() {
+            return label;
+        }
+        }
 
     private static List<CaptionTrackInterface> add(List<CaptionTrackInterface> tracks, Locale locale) {
         return AutoTranslateCaptionsPatch.addTranslationLanguages(tracks, locale);
@@ -54,6 +68,31 @@ public class AutoTranslateCaptionsPatchTest {
     private static CaptionTrackInterface find(List<CaptionTrackInterface> tracks, String code) {
         return tracks.stream().filter(t -> code.equals(t.patch_getLanguageCode()))
                 .findFirst().orElseThrow(AssertionError::new);
+    }
+
+    @Test public void languageCataloguePreservesSavedAliasesWithoutDuplicates() {
+        String[][] aliases = {{"he", "iw"}, {"nb", "no"}, {"pt-BR", "pt"},
+                {"zh-CN", "zh-Hans"}, {"zh-TW", "zh-Hant"}};
+        for (String[] alias : aliases) {
+            var codes = Arrays.asList(AutoTranslateCaptionsPatch.translationLanguages(alias[0]));
+            assertEquals(156, codes.size());
+            assertEquals(1, codes.stream().filter(alias[0]::equals).count());
+            assertFalse(codes.contains(alias[1]));
+            assertEquals(AutoTranslateCaptionsPatch.translationLanguageName(alias[1], Locale.ENGLISH),
+                    AutoTranslateCaptionsPatch.translationLanguageName(alias[0], Locale.ENGLISH));
+            assertEquals(alias[1], AutoTranslateCaptionsPatch.translationLanguage(alias[0]));
+        }
+        assertEquals(1, Arrays.stream(AutoTranslateCaptionsPatch.translationLanguages("off"))
+                .filter("iw"::equals).count());
+        assertFalse(Arrays.asList(AutoTranslateCaptionsPatch.translationLanguages("default"))
+                .contains("default"));
+    }
+
+    @Test public void generatedPortugueseLabelsDistinguishBrazilAndPortugal() {
+        var menu = add(List.of(new Track("de", "German")), Locale.ENGLISH);
+        assertEquals("Portuguese (Brazil)", find(menu, "pt").toString());
+        assertEquals("Portuguese (Portugal)", find(menu, "pt-PT").toString());
+        assertEquals("pt", find(menu, "pt").patch_getLanguageCode());
     }
 
     @Test public void addsMissingLanguagesAndKeepsNativeTracks() {
@@ -88,19 +127,35 @@ public class AutoTranslateCaptionsPatchTest {
         assertEquals(URL + "&tlang=el&fmt=srv3#opaque", find(result, "el").patch_getUrl());
     }
 
-    @Test public void nativeTranslationsMustShareSourceBeforeExpansion() {
-        Track english = new Track("de", "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&sig=x%2By&tlang=de",
+    @Test public void mixedSourcesFromTheSameVideoStillExpandWithoutReplacingNativeTargets() {
+        for (String video : List.of("bYsvNgA-tEE", "l8Sgq4zw1MY")) {
+            String base = "https://www.youtube.com/api/timedtext?v=" + video;
+            Track german = new Track("de", base + "&lang=en&kind=asr&sig=x%2By&tlang=de&fmt=srv3#opaque",
+                    "ta.en.de", "German");
+            String source = video.equals("bYsvNgA-tEE") ? "de" : "tr";
+            Track english = new Track("en", base + "&lang=" + source + "&kind=asr&sig=other&tlang=en",
+                    "ta." + source + ".en", "English");
+            List<CaptionTrackInterface> result = add(List.of(german, english), Locale.ENGLISH);
+            assertEquals(156, result.size());
+            assertSame(german, find(result, "de"));
+            assertSame(english, find(result, "en"));
+            assertEquals(base + "&lang=en&kind=asr&sig=x%2By&tlang=tr&fmt=srv3#opaque",
+                    find(result, "tr").patch_getUrl());
+            assertEquals("ta.en.tr", find(result, "tr").patch_getVssId());
+        }
+    }
+
+    @Test public void mixedSourceExpansionRequiresTheSameUnambiguousVideo() {
+        Track german = new Track("de", "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&tlang=de",
                 "ta.en.de", "German");
-        Track french = new Track("fr", "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=fr&sig=x%2By&tlang=fr",
-                "ta.fr.fr", "French");
-        Track otherVideo = new Track("fr", "https://www.youtube.com/api/timedtext?v=zyxwvutsrqp&lang=en&sig=x%2By&tlang=fr",
-                "ta.en.fr", "French");
-        for (Track other : List.of(french, otherVideo)) {
-            List<CaptionTrackInterface> nativeList = List.of(english, other);
+        for (String url : List.of(
+                "https://www.youtube.com/api/timedtext?v=zyxwvutsrqp&lang=tr&tlang=en",
+                "https://www.youtube.com/api/timedtext?lang=tr&tlang=en",
+                "https://www.youtube.com/api/timedtext?v=abcdefghijk&v=zyxwvutsrqp&lang=tr&tlang=en",
+                "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=tr&tlang=en&tlang=fr")) {
+            List<CaptionTrackInterface> nativeList = List.of(german, new Track("en", url, "ta.tr.en", "English"));
             assertSame(nativeList, add(nativeList, Locale.ENGLISH));
         }
-        assertSame(english, find(add(List.of(english), Locale.ENGLISH), "de"));
-        find(add(List.of(english), Locale.ENGLISH), "tr");
     }
 
     @Test public void nativeTranslationTargetMustBeUnambiguousAndInTheActualQuery() {
@@ -216,18 +271,18 @@ public class AutoTranslateCaptionsPatchTest {
     @Test public void preferredFallbackWorksWithoutAnAutoTranslateMenuAndReusesExistingTracks() {
         Track source = new Track("ar", "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=ar&kind=asr", "a.ar", "Arabic");
         var selected = PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "bn", Locale.ENGLISH);
-        assertEquals("bn", selected.patch_getLanguageCode());
+        assertEquals("bn", Objects.requireNonNull(selected).patch_getLanguageCode());
         assertEquals("ta.ar.bn", selected.patch_getVssId());
         Track existing = new Track("bn", "Bengali");
         assertSame(existing, PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(existing), null, "bn", Locale.ENGLISH));
-        assertEquals("ta.ar.bn", PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source, source), List.of(), null, "bn", Locale.ENGLISH).patch_getVssId());
+        assertEquals("ta.ar.bn", Objects.requireNonNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source, source), List.of(), null, "bn", Locale.ENGLISH)).patch_getVssId());
     }
 
     @Test public void preferredFallbackNormalizesLocaleTargetsAndRejectsUnknownLanguages() {
         Track source = new Track("ar", "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=ar&kind=asr", "a.ar", "Arabic");
-        assertEquals("en", PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "en-us", Locale.ENGLISH).patch_getLanguageCode());
-        assertEquals("iw", PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "he", Locale.ENGLISH).patch_getLanguageCode());
-        assertEquals("zh-Hant", PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "zh-tw", Locale.ENGLISH).patch_getLanguageCode());
+        assertEquals("en", Objects.requireNonNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "en-us", Locale.ENGLISH)).patch_getLanguageCode());
+        assertEquals("iw", Objects.requireNonNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "he", Locale.ENGLISH)).patch_getLanguageCode());
+        assertEquals("zh-Hant", Objects.requireNonNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "zh-tw", Locale.ENGLISH)).patch_getLanguageCode());
         org.junit.Assert.assertNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(source), List.of(), null, "qaa", Locale.ENGLISH));
     }
 
@@ -242,7 +297,7 @@ public class AutoTranslateCaptionsPatchTest {
         assertSame(empty, AutoTranslateCaptionsPatch.restoreTranslationTracks(empty, direct, null, Locale.ENGLISH));
         org.junit.Assert.assertNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(
                 List.copyOf(direct), List.of(), null, "bn", Locale.ENGLISH));
-        // Each audio's independently validated single-source list still works.
+        // A single-source list remains valid for each audio independently.
         assertSame(french, AutoTranslateCaptionsPatch.findFallbackSource(List.of(french), null));
     }
 
@@ -267,7 +322,7 @@ public class AutoTranslateCaptionsPatchTest {
         assertSame(french, AutoTranslateCaptionsPatch.findFallbackSource(direct, nativeDefault));
         var menu = AutoTranslateCaptionsPatch.restoreTranslationTracks(List.of(), direct, nativeDefault, Locale.ENGLISH);
         var selected = PreferredCaptionLanguagePatch.findAutoTranslatedTrack(direct, List.of(), nativeDefault, "bn", Locale.ENGLISH);
-        assertEquals("t.fr.upload.bn", selected.patch_getVssId());
+        assertEquals("t.fr.upload.bn", Objects.requireNonNull(selected).patch_getVssId());
         assertEquals("https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=fr&name=French&sig=x%2By&tlang=bn#opaque", find(menu, "bn").patch_getUrl());
         assertEquals(find(menu, "bn").patch_getUrl(), ((CaptionTrackInterface) selected).patch_getUrl());
         assertEquals(List.of(english, french), direct);
@@ -296,7 +351,7 @@ public class AutoTranslateCaptionsPatchTest {
         }
         org.junit.Assert.assertNull(AutoTranslateCaptionsPatch.findFallbackSource(null, source));
         org.junit.Assert.assertNull(AutoTranslateCaptionsPatch.findFallbackSource(List.of(), source));
-        org.junit.Assert.assertNull(AutoTranslateCaptionsPatch.findFallbackSource(java.util.Arrays.asList(source, null), source));
+        org.junit.Assert.assertNull(AutoTranslateCaptionsPatch.findFallbackSource(Arrays.asList(source, null), source));
         org.junit.Assert.assertNull(AutoTranslateCaptionsPatch.findFallbackSource(List.of(
                 new Track("DISABLE_CAPTIONS_OPTION", "", "-", "Off"),
                 new Track("AUTO_TRANSLATE_CAPTIONS_OPTION", "", "", "Auto-translate")), source));
@@ -315,11 +370,11 @@ public class AutoTranslateCaptionsPatchTest {
         Track english = new Track("en", "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&sig=a%2Bb#opaque", ".en.named", "English");
         for (String preference : List.of("pt-PT", "pt-pt")) {
             var selected = PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(english), List.of(), null, preference, Locale.ENGLISH);
-            assertEquals("pt-PT", selected.patch_getLanguageCode());
+            assertEquals("pt-PT", Objects.requireNonNull(selected).patch_getLanguageCode());
             assertEquals("t.en.named.pt-PT", selected.patch_getVssId());
             assertEquals("https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&sig=a%2Bb&tlang=pt-PT#opaque", ((CaptionTrackInterface) selected).patch_getUrl());
         }
-        assertEquals("pt", PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(english), List.of(), null, "pt-BR", Locale.ENGLISH).patch_getLanguageCode());
+        assertEquals("pt", Objects.requireNonNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(english), List.of(), null, "pt-BR", Locale.ENGLISH)).patch_getLanguageCode());
     }
 
     @Test public void preferredFallbackSupportsExistingInuktitutPreference() {
@@ -336,7 +391,7 @@ public class AutoTranslateCaptionsPatchTest {
         CaptionTrackInterface portugal = find(menu, "pt-PT");
         find(menu, "pt"); find(menu, "iu");
         assertSame(portugal, PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(english), List.copyOf(menu), null, "pt-PT", Locale.ENGLISH));
-        assertEquals("pt", PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(english), List.copyOf(menu), null, "pt-BR", Locale.ENGLISH).patch_getLanguageCode());
+        assertEquals("pt", Objects.requireNonNull(PreferredCaptionLanguagePatch.findAutoTranslatedTrack(List.of(english), List.copyOf(menu), null, "pt-BR", Locale.ENGLISH)).patch_getLanguageCode());
     }
 
     @Test public void exactExistingTranslationWinsBeforeBroaderLanguageMatch() {

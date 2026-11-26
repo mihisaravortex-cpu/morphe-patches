@@ -17,6 +17,7 @@ import androidx.annotation.Nullable;
 
 import java.lang.ref.WeakReference;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Matcher;
@@ -24,6 +25,7 @@ import java.util.regex.Pattern;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.patches.BaseVideoInformation;
 import app.morphe.extension.shared.patches.ExoPlayerInterface;
 import app.morphe.extension.shared.patches.components.ContextInterface;
 import app.morphe.extension.youtube.patches.originaltitles.RestoreOriginalTitlesPatch;
@@ -33,13 +35,12 @@ import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.Event;
 import app.morphe.extension.youtube.shared.PlayerType;
 import app.morphe.extension.youtube.shared.ShortsPlayerState;
-import app.morphe.extension.youtube.shared.VideoState;
 
 /**
  * Hooking class for the current playing video.
  * @noinspection unused
  */
-public final class VideoInformation {
+public final class VideoInformation extends BaseVideoInformation {
 
     public interface PlaybackController {
         // Methods are added during patching.
@@ -71,6 +72,10 @@ public final class VideoInformation {
         // Methods are added during patching.
         String patch_getQualityName();
         int patch_getResolution();
+        /**
+         * @return The IDs (itags) of the formats of the quality, empty if the quality has no formats.
+         */
+        Collection<?> patch_getFormatIds();
     }
 
     /**
@@ -159,6 +164,11 @@ public final class VideoInformation {
      * Fires whenever the playback speed changes.
      */
     public static final Event<Float> onPlaybackSpeedChange = new Event<>();
+    /**
+     * Fires when the user selects a playback speed in a native or Morphe speed menu,
+     * including a selection of the speed that is already playing.
+     */
+    public static final Event<Float> onUserSelectedPlaybackSpeed = new Event<>();
 
     /**
      * The current playback audio pitch
@@ -218,6 +228,7 @@ public final class VideoInformation {
         playerVideo.videoIdSet = false;
     }
 
+    @SuppressWarnings("SameReturnValue")
     private static boolean isPatchIncluded() {
         return false;  // Modified during patching.
     }
@@ -273,6 +284,12 @@ public final class VideoInformation {
      * Fires whenever a new channel ID is extracted for the current video.
      */
     public static final Event<String> onChannelIdChange = new Event<>();
+
+    /**
+     * Fires whenever the video of a player changes, such as when the next Short starts.
+     * Not when the same video is loaded again, such as after the app returns from the background.
+     */
+    public static final Event<String> onVideoIdChange = new Event<>();
 
     @Nullable
     public static VideoQualityInterface[] getCurrentQualities() {
@@ -425,6 +442,26 @@ public final class VideoInformation {
     }
 
     /**
+     * The miniplayer only shows the video of the regular player, so the player in front
+     * is not used, as the Shorts player can be in front while the miniplayer is shown,
+     * such as when going back from the Shorts player.
+     *
+     * @return The title of the video of the regular player,
+     *         or the title restored by {@link RestoreOriginalTitlesPatch} if enabled.
+     */
+    public static String getMiniplayerVideoName() {
+        return RestoreOriginalTitlesPatch.getTitle(regularPlayerVideo.videoId, regularPlayerVideo.videoTitle);
+    }
+
+    /**
+     * @return The channel name of the video of the regular player.
+     * @see #getMiniplayerVideoName()
+     */
+    public static String getMiniplayerChannelName() {
+        return regularPlayerVideo.channelName;
+    }
+
+    /**
      * Injection point.
      *
      * @param newlyLoadedVideoId ID of the current video
@@ -440,21 +477,16 @@ public final class VideoInformation {
         if (!playerVideo.videoId.equals(newlyLoadedVideoId)) {
             Logger.printDebug(() -> "New video ID: " + newlyLoadedVideoId);
             playerVideo.videoId = newlyLoadedVideoId;
+            LocalQueuePatch.onVideoChanged();
+            onVideoIdChange.invoke(newlyLoadedVideoId);
         }
-    }
-
-    /**
-     * @return If the player parameters are for a Short.
-     */
-    public static boolean playerParametersAreShort(String parameters) {
-        return parameters.startsWith(SHORTS_PLAYER_PARAMETERS);
     }
 
     /**
      * Injection point.
      */
     public static String newPlayerResponseSignature(String signature, String videoId, boolean isShortAndOpeningOrPlaying) {
-        final boolean isShort = playerParametersAreShort(signature);
+        final boolean isShort = signature.startsWith(SHORTS_PLAYER_PARAMETERS);
         playerResponseVideoIdIsShort = isShort;
         if (!isShort || isShortAndOpeningOrPlaying) {
             if (videoIdIsShort != isShort) {
@@ -542,7 +574,10 @@ public final class VideoInformation {
     /**
      * Injection point.
      */
-    public static void videoSpeedChanged(float currentVideoSpeed) {
+    public static void videoSpeedChanged(float videoSpeed) {
+        // The Shorts player reports its own speed when a Short loads,
+        // but plays at the overridden Shorts speed.
+        final float currentVideoSpeed = RememberPlaybackSpeedPatch.getPlaybackSpeedInShorts(videoSpeed);
         Logger.printDebug(() -> "Video speed changed: " + currentVideoSpeed);
         // An exception occurs when the playback speed dialog is opened by an overlay button while 'Restore old playback speed menu' is off.
         // Update the formatted string value to avoid the exception.
@@ -568,7 +603,7 @@ public final class VideoInformation {
         RememberPlaybackSpeedPatch.userSelectedPlaybackAudioPitch(playbackAudioPitch);
         if (!Settings.PLAYBACK_AUDIO_TIME_STRETCHING.get() && previousPlaybackSpeed != playbackSpeed) {
             RememberPlaybackSpeedPatch.userSelectedPlaybackSpeed(playbackSpeed);
-            changePlaybackSpeed(playbackSpeed);
+            applyUserSelectedPlaybackSpeed(playbackSpeed);
         } else {
             setPlaybackParameters(playbackSpeed, playbackAudioPitch);
         }
@@ -582,6 +617,7 @@ public final class VideoInformation {
      */
     public static void userSelectedPlaybackSpeed(float userSelectedPlaybackSpeed) {
         Logger.printDebug(() -> "User selected playback speed: " + userSelectedPlaybackSpeed);
+        onUserSelectedPlaybackSpeed.invoke(userSelectedPlaybackSpeed);
         updatePlaybackSpeedValue(userSelectedPlaybackSpeed);
         if (isPlaybackAudioPitchLinked()) {
             RememberPlaybackSpeedPatch.userSelectedPlaybackAudioPitch(userSelectedPlaybackSpeed);
@@ -694,9 +730,12 @@ public final class VideoInformation {
             final long videoLength = getVideoLength();
 
             // Prevent issues such as play/ pause button or autoplay not working.
-            final long adjustedSeekTime = Math.min(seekTime, videoLength - 250);
+            // The video length is rounded to whole seconds, so the stream can end up to half a second
+            // before it. A seek closer to the end can land on the last frame, and the video never ends:
+            // the player keeps the pause button instead of the replay button and autoplay does not start.
+            final long adjustedSeekTime = Math.min(seekTime, videoLength - 1000);
             if (videoTime <= seekTime && videoTime >= adjustedSeekTime) {
-                // Both the current video time and the seekTo are in the last 250ms of the video.
+                // Both the current video time and the seekTo are in the last second of the video.
                 // Ignore this seek call, otherwise if a video ends with multiple closely timed segments
                 // then seeking here can create an infinite loop of skip attempts.
                 Logger.printDebug(() -> "Ignoring seekTo call as video playback is almost finished. "
@@ -915,58 +954,30 @@ public final class VideoInformation {
     }
 
     /**
-     * @return The current non casting player time. Value is zero if casting.
-     */
-    private static long getPlayerVideoTime() {
-        PlaybackController controller = getPlayerVideo().playerControllerRef.get();
-        return controller != null
-                ? controller.patch_getVideoTime()
-                : -1;
-    }
-
-    /**
-     * @return The current casting player time. Value is zero if not casting.
-     */
-    private static long getMdxVideoTime() {
-        PlaybackController controller = mdxPlayerDirectorRef.get();
-        return controller != null
-                ? controller.patch_getVideoTime()
-                : -1;
-    }
-
-    /**
      * Playback time of the current video playing. Includes Shorts.
      * If casting then the time is always rounded down to the nearest whole second.
      *
      * @return The time of the video in milliseconds, or -1 if not the player is not available.
      */
     public static long getVideoTime() {
-        final long playerTime = getPlayerVideoTime();
+        // The current non casting player time. Value is zero if casting.
+        PlaybackController playerController = getPlayerVideo().playerControllerRef.get();
+        final long playerTime = playerController != null
+                ? playerController.patch_getVideoTime()
+                : -1;
         // If time is zero, then playback may be casting.
         if (playerTime > 0) {
             return playerTime;
         }
 
-        final long mdxTime = getMdxVideoTime();
+        // The casting player time.
+        PlaybackController controller = mdxPlayerDirectorRef.get();
+        final long mdxTime = controller != null
+                ? controller.patch_getVideoTime()
+                : -1;
         return mdxTime >= 0
                 ? mdxTime
                 : playerTime;
-    }
-
-    /**
-     * If video is playing in the background with no video visible,
-     * this always returns false (even if the video is actually at the end).
-     * <p>
-     * This is equivalent to checking for {@link VideoState#ENDED},
-     * but can give a more up-to-date result for code calling from some hooks.
-     *
-     * @return If the playback is at the end of the video.
-     * @see VideoState
-     */
-    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
-    public static boolean isAtEndOfVideo() {
-        final long videoLength = getVideoLength();
-        return getVideoTime() >= videoLength && videoLength > 0;
     }
 
     /**
@@ -977,12 +988,7 @@ public final class VideoInformation {
         Utils.verifyOnMainThread();
 
         if (currentPlaybackSpeedMenuInterface == null) {
-            Logger.LogMessage logMessage = () -> "Debug: Cannot change playback speed, menu interface is null";
-            if (Settings.DEBUG.get()) {
-                Logger.printException(logMessage);
-            } else {
-                Logger.printDebug(logMessage);
-            }
+            Logger.printExceptionIfDebug(() -> "Debug: Cannot change playback speed, menu interface is null");
             return;
         }
         if (playbackSpeed <= 0 || playbackSpeed > PLAYBACK_SPEED_MAXIMUM) {
@@ -1023,12 +1029,7 @@ public final class VideoInformation {
             exoPlayerInterface.patch_setPlaybackParameters(speed, pitch);
             Logger.printDebug(() -> "Video playbackParameters changed, speed: " + speed + " pitch: " + pitch);
         } else {
-            Logger.LogMessage logMessage = () -> "Debug: Cannot change speed parameters, menu interface is null";
-            if (Settings.DEBUG.get()) {
-                Logger.printException(logMessage);
-            } else {
-                Logger.printDebug(logMessage);
-            }
+            Logger.printExceptionIfDebug(() -> "Debug: Cannot change speed parameters, menu interface is null");
         }
     }
 
@@ -1103,7 +1104,13 @@ public final class VideoInformation {
      * @param newlyLoadedPlaybackSpeed The current playback speed.
      */
     public static void setPlaybackSpeed(float newlyLoadedPlaybackSpeed) {
+        onUserSelectedPlaybackSpeed.invoke(newlyLoadedPlaybackSpeed);
         if (!updatePlaybackSpeedValue(newlyLoadedPlaybackSpeed)) {
+            // The Shorts player can play at another speed than the one last recorded,
+            // such as when it reopens, so the selected speed is always applied.
+            if (ShortsPlayerState.isOpen()) {
+                applyUserSelectedPlaybackSpeed(newlyLoadedPlaybackSpeed);
+            }
             return;
         }
 
@@ -1111,7 +1118,29 @@ public final class VideoInformation {
         if (isPlaybackAudioPitchLinked()) {
             RememberPlaybackSpeedPatch.userSelectedPlaybackAudioPitch(playbackAudioPitch);
         }
-        changePlaybackSpeed(playbackSpeed);
+        applyUserSelectedPlaybackSpeed(playbackSpeed);
+    }
+
+    /**
+     * Sets the speed of the Shorts player, which has no playback speed menu interface.
+     */
+    public static void setShortsPlaybackSpeed(float speed) {
+        updatePlaybackSpeedValue(speed);
+        setPlaybackParameters(speed, playbackAudioPitch);
+    }
+
+    /**
+     * Applies a speed the user selected in a Morphe speed menu.
+     * The Shorts player ignores {@link #changePlaybackSpeed(float)}, so the speed
+     * is set on the player directly and kept for the following Shorts.
+     */
+    private static void applyUserSelectedPlaybackSpeed(float speed) {
+        if (ShortsPlayerState.isOpen()) {
+            RememberPlaybackSpeedPatch.setShortsSelectedPlaybackSpeed(speed);
+            setPlaybackParameters(speed, playbackAudioPitch);
+            return;
+        }
+        changePlaybackSpeed(speed);
     }
 
     private static void setCurrentQuality(@Nullable VideoQualityInterface quality) {

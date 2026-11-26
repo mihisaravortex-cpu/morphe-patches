@@ -35,9 +35,11 @@ import app.morphe.extension.shared.ResourceType;
 import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.patches.components.ContextInterface;
-import app.morphe.extension.shared.settings.BaseSettings;
 import app.morphe.extension.shared.spoof.SpoofAppVersionPatch;
+import app.morphe.extension.youtube.patches.ClassicSubscriptionsLayoutPatch;
 import app.morphe.extension.youtube.patches.VersionCheckPatch;
+import app.morphe.extension.youtube.patches.ghostplay.GhostPlayPatch;
+import app.morphe.extension.youtube.patches.ghostplay.GhostPlayToolbarButton;
 import app.morphe.extension.youtube.settings.Settings;
 
 @SuppressWarnings("unused")
@@ -71,13 +73,6 @@ public final class NavigationBar {
         onNavigationButtonChangedListeners.add(listener);
     }
 
-    /**
-     * Unregisters a listener from being notified when the navigation button changes.
-     */
-    public static void removeOnNavigationButtonChangedListener(OnNavigationButtonChangedListener listener) {
-        onNavigationButtonChangedListeners.remove(listener);
-    }
-
     private static void notifyNavigationButtonChangedListeners(@Nullable NavigationButton button) {
         for (OnNavigationButtonChangedListener listener : onNavigationButtonChangedListeners) {
             listener.onNavigationButtonChanged(button);
@@ -109,6 +104,7 @@ public final class NavigationBar {
                 }
                 if (view == searchBarResultsRef.get()) {
                     isSearchBarAttached = true;
+                    Logger.printVerbose(() -> "Search bar shown");
                 }
             }
 
@@ -121,6 +117,7 @@ public final class NavigationBar {
                 if (view == searchBarResultsRef.get()) {
                     // View#isShown() is still true while the detach listeners are called.
                     isSearchBarAttached = false;
+                    Logger.printVerbose(() -> "Search bar hidden");
                 }
             }
         });
@@ -140,6 +137,10 @@ public final class NavigationBar {
         }
 
         toolbarResultsRef = new WeakReference<>(toolbar);
+
+        if (GhostPlayPatch.isPatchIncluded()) {
+            GhostPlayToolbarButton.attachToToolbar(layout);
+        }
     }
 
     /**
@@ -156,6 +157,22 @@ public final class NavigationBar {
     }
 
     /**
+     * @return If the search results are behind the Shorts player, such as the search results a Short
+     *         was opened from. The Shorts player hides the search bar while it's open,
+     *         and the feed behind it can be laid out again meanwhile.
+     */
+    public static boolean isSearchBarBehindShortsPlayer() {
+        return isSearchBarBehindShortsPlayer;
+    }
+
+    private static volatile boolean isSearchBarBehindShortsPlayer;
+
+    static {
+        ShortsPlayerState.getOnChange().addObserver(isOpen ->
+                isSearchBarBehindShortsPlayer = isOpen && isSearchBarActive());
+    }
+
+    /**
      * If the last loaded search bar is attached to the window.
      */
     private static volatile boolean isSearchBarAttached;
@@ -164,8 +181,8 @@ public final class NavigationBar {
      * Search bar closed by the back button/gesture or by a navigation button.
      * <p>
      * Litho starts filtering the tab below the search before the search bar is detached,
-     * and without this the tab is filtered as search results. Waiting on the Litho thread
-     * for the detach is not possible, because the main thread can wait for the same Litho layout
+     * and without this the tab is filtered as search results. The Litho thread cannot wait
+     * until the search bar detaches, because the main thread can wait for the same Litho layout
      * before it detaches the search bar.
      * <p>
      * Only this search bar is considered closed, so a search bar loaded again
@@ -197,10 +214,7 @@ public final class NavigationBar {
 
         Utils.runOnMainThreadDelayed(() -> {
             if (closingSearchBarResultsRef.get() == searchbarResults) {
-                // Log as exception level, only if debug is enabled.
-                if (Settings.DEBUG.get()) {
-                    Logger.printException(() -> "Search bar was not closed");
-                }
+                Logger.printExceptionIfDebug(() -> "Search bar was not closed");
                 closingSearchBarResultsRef = new WeakReference<>(null);
             }
         }, SEARCH_BAR_CLOSING_TIMEOUT_MILLISECONDS);
@@ -326,7 +340,7 @@ public final class NavigationBar {
     private static final long TAPPED_NAVIGATION_BUTTON_TIMEOUT_MILLISECONDS = 1000;
 
     /**
-     * Navigation button selected again by going back from the root of the You tab,
+     * Navigation button selected again by going back from the root of the 'You' tab,
      * and when going back.
      * <p>
      * Litho filters the tab it goes back to before the navigation bar is updated (150-600ms later),
@@ -435,6 +449,9 @@ public final class NavigationBar {
             goingBackCancelled = false;
 
             String lastEnumName = lastYTNavigationEnumName;
+            // The enum is of this tab only. The 'You' tab has no enum, and it's
+            // created right after the Create tab of the newer layout.
+            lastYTNavigationEnumName = null;
 
             for (NavigationButton buttonType : NavigationButton.values()) {
                 if (buttonType.ytEnumNames.contains(lastEnumName)) {
@@ -445,12 +462,9 @@ public final class NavigationBar {
                 }
             }
 
-            // Log the unknown tab as exception level, only if debug is enabled.
-            // This is because unknown tabs do no harm, and it's only relevant to developers.
-            if (Settings.DEBUG.get()) {
-                Logger.printException(() -> "Unknown tab: " + lastEnumName
-                        + " view: " + navigationButtonGroup.getClass());
-            }
+            // Unknown tabs do no harm, and are only relevant to developers.
+            Logger.printExceptionIfDebug(() -> "Unknown tab: " + lastEnumName
+                    + " view: " + navigationButtonGroup.getClass());
         } catch (Exception ex) {
             Logger.printException(() -> "navigationTabLoaded failure", ex);
         }
@@ -459,17 +473,15 @@ public final class NavigationBar {
     /**
      * Injection point.
      * <p>
-     * Unique hook just for the 'Create' and 'You' tab.
+     * Unique hook just for the 'Create' and 'You' tab (all tabs in 21.43+).
      */
     public static void navigationImageResourceTabLoaded(View view) {
         // 'You' tab has no YT enum name and the enum hook is not called for it.
         // Compare the last enum to figure out which tab this actually is.
-        if (NavigationBar.NavigationButton.CREATE.ytEnumNames.contains(lastYTNavigationEnumName)) {
-            navigationTabLoaded(view);
-        } else {
+        if (lastYTNavigationEnumName == null) {
             lastYTNavigationEnumName = NavigationButton.LIBRARY.ytEnumNames.get(0);
-            navigationTabLoaded(view);
         }
+        navigationTabLoaded(view);
     }
 
     /**
@@ -485,10 +497,7 @@ public final class NavigationBar {
             NavigationButton oldButton = NavigationButton.selectedNavigationButton;
 
             if (button == null) { // An unknown tab was selected.
-                // Show a toast only if debug mode is enabled.
-                if (BaseSettings.DEBUG.get()) {
-                    Logger.printException(() -> "Unknown navigation view selected: " + navButtonImageView);
-                }
+                Logger.printExceptionIfDebug(() -> "Unknown navigation view selected: " + navButtonImageView);
 
                 NavigationButton.selectedNavigationButton = null;
                 openedFromNavigationButton = null;
@@ -547,7 +556,7 @@ public final class NavigationBar {
 
     /**
      * Going back from the root of a tab selects again the tab it was opened from.
-     * Only the You tab is used, as its root shows only horizontal collections, and the tabs it is
+     * Only the 'You' tab is used, as its root shows only horizontal collections, and the tabs it is
      * verified to select again: the Home and Subscriptions tabs. The Subscriptions feed is not used,
      * as its elements cannot be told apart from the elements of the Home feed.
      * <p>
@@ -617,6 +626,55 @@ public final class NavigationBar {
                 : null;
     }
 
+    //
+    // Tabs at the top of Home.
+    //
+
+    /**
+     * Tab list of the Home page that has its Subscriptions tab selected, with the A/B layout that moves
+     * Subscriptions from the navigation bar to a tab at the top of Home.
+     * Each page with tabs has its own tab list, so the tabs of other pages (such as a channel opened
+     * from the Subscriptions tab) do not change it, and it is cleared when the Home page is closed.
+     */
+    private static volatile WeakReference<Object> subscriptionsTabListRef = new WeakReference<>(null);
+
+    /**
+     * Tab identifier of the Subscriptions tab at the top of Home. Like the category tabs of Home,
+     * the identifier is a filter type, and only the endpoint of the tab has the Subscriptions browse id.
+     */
+    private static final String SUBSCRIPTIONS_HOME_TAB_IDENTIFIER = "ATTRIBUTE_FILTER_TYPE_BROWSE_FEED_SUBSCRIPTIONS";
+
+    /**
+     * Injection point.
+     * <p>
+     * A tab is selected in a page with tabs, such as the tabs at the top of Home or the tabs of a channel.
+     *
+     * @param tabList       Tab list of the page.
+     * @param tabIdentifier Tab identifier of the selected tab.
+     */
+    public static void browseTabSelected(Object tabList, @Nullable String tabIdentifier) {
+        try {
+            // The Subscriptions feed opened by its navigation button can have the same tabs as Home,
+            // with its own tab selected.
+            if (NavigationButton.selectedNavigationButton == NavigationButton.SUBSCRIPTIONS) {
+                return;
+            }
+
+            Logger.printDebug(() -> "Tab selected: " + tabIdentifier);
+
+            if (SUBSCRIPTIONS_HOME_TAB_IDENTIFIER.equals(tabIdentifier)
+                    || ClassicSubscriptionsLayoutPatch.SUBSCRIPTIONS_BROWSE_ID.equals(tabIdentifier)) {
+                subscriptionsTabListRef = new WeakReference<>(tabList);
+            } else if (tabList == subscriptionsTabListRef.get()
+                    // A Home page that is opened again starts with its Home tab selected.
+                    || ClassicSubscriptionsLayoutPatch.HOME_BROWSE_ID.equals(tabIdentifier)) {
+                subscriptionsTabListRef = new WeakReference<>(null);
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "browseTabSelected failure", ex);
+        }
+    }
+
     /** @noinspection EmptyMethod*/
     private static void navigationTabCreatedCallback(NavigationButton button, View tabView) {
         // Code is added during patching.
@@ -635,12 +693,11 @@ public final class NavigationBar {
      * Injection point.
      * Fixes missing drawable.
      */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    public static void setCairoNotificationFilledIcon(EnumMap enumMap, Enum tabActivityCairo) {
+    public static <E extends Enum<E>> void setCairoNotificationFilledIcon(EnumMap<E, Integer> enumMap, E tabActivityCairo) {
         // Show a popup informing this fix is no longer needed to those who might care.
-        if (BaseSettings.DEBUG.get() && enumMap.containsKey(tabActivityCairo)) {
-            Logger.printException(() -> "YouTube fixed the notification icons");
-        }
+        Logger.printExceptionIfDebug(() -> enumMap.containsKey(tabActivityCairo)
+                ? "YouTube fixed the notification icons"
+                : null);
 
         enumMap.putIfAbsent(tabActivityCairo, fillBellCairoBlack);
     }
@@ -652,7 +709,12 @@ public final class NavigationBar {
          * Create new video tab.
          * This tab will never be in a selected state, even if the Create video UI is on screen.
          */
-        CREATE("CREATION_TAB_LARGE", "CREATION_TAB_LARGE_CAIRO"),
+        CREATE(
+                "CREATION_TAB_LARGE",
+                "CREATION_TAB_LARGE_CAIRO",
+                // Newer layout, where the tab is a regular tab next to the 'You' tab.
+                "ADD_CIRCLE_OUTLINE"
+        ),
         /**
          * Only shown when 'Show Search' is turned on.
          */
@@ -661,6 +723,10 @@ public final class NavigationBar {
          * Only shown when 'Show Settings' is turned on.
          */
         SETTINGS("SETTINGS", "SETTINGS_CAIRO"),
+        /**
+         * Only shown when 'Show Watch later' is turned on.
+         */
+        WATCH_LATER("WATCH_LATER", "WATCH_LATER_FILLED", "WATCH_LATER_CAIRO"),
         /**
          * Only shown when 'Show Series in navigation bar' is turned on.
          */
@@ -700,7 +766,7 @@ public final class NavigationBar {
          */
         boolean closesSearch() {
             return this == HOME || this == SHORTS || this == SUBSCRIPTIONS
-                    || this == NOTIFICATIONS || this == SERIES || this == LIBRARY;
+                    || this == NOTIFICATIONS || this == SERIES || this == WATCH_LATER || this == LIBRARY;
         }
 
         /**
@@ -717,17 +783,30 @@ public final class NavigationBar {
          * @return The active navigation tab.
          *         If the user is in the upload video UI, this returns tab that is still visually
          *         selected on screen (whatever tab the user was on before tapping the upload button).
+         *         The Subscriptions tab at the top of Home is the {@link #SUBSCRIPTIONS} tab,
+         *         the same as the Subscriptions navigation button.
          */
         @Nullable
         public static NavigationButton getSelectedNavigationButton() {
             waitForNavButtonLatchIfNeeded();
-            return selectedNavigationButton;
+            return getFeedNavigationButton(selectedNavigationButton);
+        }
+
+        /**
+         * @return {@link #SUBSCRIPTIONS} if the button is {@link #HOME} and the Subscriptions tab
+         *         at the top of Home is selected, otherwise the button.
+         */
+        @Nullable
+        private static NavigationButton getFeedNavigationButton(@Nullable NavigationButton button) {
+            return button == HOME && subscriptionsTabListRef.get() != null
+                    ? SUBSCRIPTIONS
+                    : button;
         }
 
         /**
          * Same as {@link #getSelectedNavigationButton()}, but while going back from the root of the
-         * You tab, the Litho elements that are not in a horizontal collection are of the tab it goes
-         * back to, as the elements of the root of the You tab are in horizontal collections.
+         * 'You' tab, the Litho elements that are not in a horizontal collection are of the tab it goes
+         * back to, as the elements of the root of the 'You' tab are in horizontal collections.
          *
          * @param contextInterface Context of the filtered Litho element.
          */
@@ -738,7 +817,7 @@ public final class NavigationBar {
                 waitForNavButtonLatchIfNeeded();
                 NavigationButton goingBackButton = getGoingBackNavigationButton();
                 if (goingBackButton != null) {
-                    return goingBackButton;
+                    return getFeedNavigationButton(goingBackButton);
                 }
             }
 

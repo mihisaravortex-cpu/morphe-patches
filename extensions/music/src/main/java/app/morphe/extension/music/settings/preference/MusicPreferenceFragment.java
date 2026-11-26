@@ -11,6 +11,7 @@
 package app.morphe.extension.music.settings.preference;
 
 import android.app.Dialog;
+import android.content.Intent;
 import android.preference.PreferenceScreen;
 import android.widget.Toolbar;
 
@@ -18,6 +19,7 @@ import app.morphe.extension.music.settings.MusicActivityHook;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.patches.GmsCoreSupportPatch;
 import app.morphe.extension.shared.settings.SharedYouTubeSettings;
+import app.morphe.extension.shared.settings.preference.NewSettingsIndicator;
 import app.morphe.extension.shared.settings.preference.ToolbarPreferenceFragment;
 
 /**
@@ -29,6 +31,14 @@ public class MusicPreferenceFragment extends ToolbarPreferenceFragment {
      * The main PreferenceScreen used to display the current set of preferences.
      */
     private PreferenceScreen preferenceScreen;
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == LyricsCustomFontPreference.PICK_FONT_REQUEST_CODE) {
+            LyricsCustomFontPreference.handleActivityResult(getContext(), resultCode, data);
+        }
+    }
 
     /**
      * Initializes the preference fragment.
@@ -53,6 +63,8 @@ public class MusicPreferenceFragment extends ToolbarPreferenceFragment {
                         SharedYouTubeSettings.CUSTOM_BRANDING_NOTIFICATION_ICON.key,
                         SharedYouTubeSettings.CUSTOM_BRANDING_NAME.key);
             }
+
+            NewSettingsIndicator.markNewPreferences(preferenceScreen);
         } catch (Exception ex) {
             Logger.printException(() -> "initialize failure", ex);
         }

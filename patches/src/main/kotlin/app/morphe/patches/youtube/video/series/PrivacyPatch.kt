@@ -8,14 +8,11 @@
 package app.morphe.patches.youtube.video.series
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
-import app.morphe.patcher.patch.BytecodePatchContext
-import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
+import app.morphe.patcher.patch.classDefByOrNull
+import app.morphe.patcher.util.addPatchInterface
 import app.morphe.util.findFieldFromToString
-import com.android.tools.smali.dexlib2.AccessFlags
-import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
-import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 
 private const val PRIVACY = "${SERIES_TRACKER_EXTENSION_PREFIX}RecordingPrivacy;"
 private const val SOURCE = $$"$${SERIES_TRACKER_EXTENSION_PREFIX}RecordingPrivacy$Source;"
@@ -24,7 +21,8 @@ private const val IDENTITY = $$"$${SERIES_TRACKER_EXTENSION_PREFIX}RecordingPriv
 /** Resolve the current-account providers, never an arbitrary identity getter or request header. */
 internal data class NativeAccountContract(val type: String, val id: String, val incognito: String)
 
-internal fun BytecodePatchContext.wirePrivacy(): NativeAccountContract {
+/** Also used by the native playlist queue. Resolving it does not install the Series tracker. */
+internal fun resolveNativeAccountContract(): NativeAccountContract {
     val identity = AccountIdentityFingerprint.originalClassDef
     val diagnostic = AccountIdentityFingerprint.originalMethod
 
@@ -53,6 +51,12 @@ internal fun BytecodePatchContext.wirePrivacy(): NativeAccountContract {
             IdentityInterfaceMethodFingerprint(idGetter).matchOrNull(it)
         } != null
     }
+    return NativeAccountContract(contract, idGetter.signature(), incognitoGetter.signature())
+}
+
+internal fun wirePrivacy(): NativeAccountContract {
+    val account = resolveNativeAccountContract()
+    val contract = account.type
     // There are two current-account providers. Either one can be the active provider.
     val providers = CurrentAccountProviderFingerprint.matchAll()
         .map { it.originalClassDef }
@@ -61,27 +65,16 @@ internal fun BytecodePatchContext.wirePrivacy(): NativeAccountContract {
         val currentMatch = CurrentAccountGetterFingerprint(contract).match(provider)
         val current = currentMatch.originalMethod
         val mutable = currentMatch.classDef
-        mutable.interfaces.add(SOURCE)
-        val bridge = ImmutableMethod(
-            provider.type,
+        mutable.addPatchInterface(
+            SOURCE,
             "patch_seriesTrackerIdentity",
-            null,
-            IDENTITY,
-            AccessFlags.PUBLIC.value,
-            null,
-            null,
-            MutableMethodImplementation(5),
-        ).toMutable()
-
-        bridge.addInstructions(
-            0,
             """
                 invoke-virtual {p0}, $current
                 move-result-object v0
                 if-eqz v0, :unknown
-                invoke-interface {v0}, $contract->${idGetter.signature()}
+                invoke-interface {v0}, $contract->${account.id}
                 move-result-object v1
-                invoke-interface {v0}, $contract->${incognitoGetter.signature()}
+                invoke-interface {v0}, $contract->${account.incognito}
                 move-result v2
                 new-instance v3, $IDENTITY
                 invoke-direct {v3, v1, v2}, $IDENTITY-><init>(Ljava/lang/String;Z)V
@@ -91,7 +84,6 @@ internal fun BytecodePatchContext.wirePrivacy(): NativeAccountContract {
                 return-object v0
             """
         )
-        mutable.methods.add(bridge)
         // Capture only when YouTube actually uses the current-account getter. Constructor order
         // does not establish which provider is active. attach() never calls back into the provider.
         currentMatch.method.addInstructions(
@@ -99,5 +91,5 @@ internal fun BytecodePatchContext.wirePrivacy(): NativeAccountContract {
             "invoke-static/range {p0 .. p0}, $PRIVACY->attach($SOURCE)V",
         )
     }
-    return NativeAccountContract(contract, idGetter.signature(), incognitoGetter.signature())
+    return account
 }

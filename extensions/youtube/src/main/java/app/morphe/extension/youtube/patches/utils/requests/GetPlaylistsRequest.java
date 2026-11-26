@@ -7,6 +7,8 @@
 
 package app.morphe.extension.youtube.patches.utils.requests;
 
+import android.util.Pair;
+
 import androidx.annotation.Nullable;
 
 import org.json.JSONArray;
@@ -21,45 +23,25 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.requests.Requester;
-import app.morphe.extension.shared.settings.BaseSettings;
-import kotlin.Pair;
 
 public class GetPlaylistsRequest {
-    private static final int MAX_MILLISECONDS_TO_WAIT_FOR_FETCH = 20 * 1000;
-
     public static final Map<String, GetPlaylistsRequest> cache = Collections.synchronizedMap(
             Utils.createSizeRestrictedMap(50));
 
-    private final Future<Pair<String, String>[]> future;
+    private final Future<List<Pair<String, String>>> future;
 
     private GetPlaylistsRequest(String playlistId, Map<String, String> requestHeader) {
         this.future = Utils.submitOnBackgroundThread(() -> fetch(playlistId, requestHeader));
     }
 
     @Nullable
-    public Pair<String, String>[] getPlaylists() {
-        try {
-            if (BaseSettings.DEBUG.get() && !future.isDone() && Utils.isCurrentlyOnMainThread()) {
-                Logger.printException(() -> "Debug: Blocking main thread");
-            }
-            return future.get(MAX_MILLISECONDS_TO_WAIT_FOR_FETCH, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException ex) {
-            Logger.printInfo(() -> "getPlaylists timed out", ex);
-        } catch (InterruptedException ex) {
-            Logger.printException(() -> "getPlaylists interrupted", ex);
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException ex) {
-            Logger.printException(() -> "getPlaylists failure", ex);
-        }
-        return null;
+    public List<Pair<String, String>> getPlaylists() {
+        return PlaylistRoutes.getResult(future, "getPlaylists");
     }
 
     public static void clear() {
@@ -67,21 +49,10 @@ public class GetPlaylistsRequest {
     }
 
     public static GetPlaylistsRequest fetchRequestIfNeeded(String playlistId, Map<String, String> requestHeader) {
-        cache.computeIfAbsent(
+        return cache.computeIfAbsent(
                 Objects.requireNonNull(playlistId),
                 k -> new GetPlaylistsRequest(playlistId, requestHeader)
         );
-        return cache.get(playlistId);
-    }
-
-    @SuppressWarnings("unused")
-    @Nullable
-    public static GetPlaylistsRequest getRequestForPlaylistId(String playlistId) {
-        return cache.get(playlistId);
-    }
-
-    private static void handleConnectionError(String toastMessage, @Nullable Exception ex) {
-        Logger.printInfo(() -> toastMessage, ex);
     }
 
     @Nullable
@@ -101,11 +72,11 @@ public class GetPlaylistsRequest {
             if (responseCode == Requester.HTTP_STATUS_CODE_SUCCESS) {
                 return Requester.parseJSONObject(connection);
             }
-            handleConnectionError("Get playlists failed with code: " + responseCode, null);
+            PlaylistRoutes.handleConnectionError("Get playlists failed with code: " + responseCode, null);
         } catch (SocketTimeoutException ex) {
-            handleConnectionError("Connection timeout", ex);
+            PlaylistRoutes.handleConnectionError("Connection timeout", ex);
         } catch (IOException ex) {
-            handleConnectionError("Network error", ex);
+            PlaylistRoutes.handleConnectionError("Network error", ex);
         } catch (Exception ex) {
             Logger.printException(() -> "sendRequest failed", ex);
         } finally {
@@ -115,8 +86,7 @@ public class GetPlaylistsRequest {
     }
 
     @Nullable
-    @SuppressWarnings("unchecked")
-    private static Pair<String, String>[] parseResponse(JSONObject json) {
+    private static List<Pair<String, String>> parseResponse(JSONObject json) {
         try {
             Object addToPlaylistRendererElement = json.getJSONArray("contents").get(0);
             if (addToPlaylistRendererElement instanceof JSONObject addToPlaylistRendererObj) {
@@ -141,7 +111,7 @@ public class GetPlaylistsRequest {
                 }
 
                 if (!playlists.isEmpty()) {
-                    return playlists.toArray(new Pair[0]);
+                    return playlists;
                 }
             }
         } catch (JSONException e) {
@@ -151,7 +121,7 @@ public class GetPlaylistsRequest {
     }
 
     @Nullable
-    private static Pair<String, String>[] fetch(String playlistId, Map<String, String> requestHeader) {
+    private static List<Pair<String, String>> fetch(String playlistId, Map<String, String> requestHeader) {
         JSONObject json = sendRequest(playlistId, requestHeader);
         if (json != null) {
             return parseResponse(json);

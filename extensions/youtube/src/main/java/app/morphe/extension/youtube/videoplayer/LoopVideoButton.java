@@ -17,7 +17,11 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.RoundRectShape;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.Selection;
+import android.text.TextWatcher;
+import android.text.method.DigitsKeyListener;
 import android.util.Pair;
 import android.view.View;
 import android.view.ViewGroup;
@@ -107,14 +111,25 @@ public class LoopVideoButton {
         if (legacy == null) return;
         Utils.verifyOnMainThread();
 
+        toggleLoopState();
+        animateButtonTransition(buttonView, getTargetIcon());
+    }
+
+    /**
+     * Toggles the loop from outside the button, such as from the launcher of the hold gesture.
+     */
+    public static void toggleLoop() {
+        toggleLoopState();
+        updateButtonIcon();
+    }
+
+    private static void toggleLoopState() {
         final boolean newState = !Settings.LOOP_VIDEO.get();
         setLoopButton(newState);
 
-        Utils.showToastShort(str(newState
+        Utils.showSnackbarShort(str(newState
                 ? "morphe_loop_video_button_toast_on"
                 : "morphe_loop_video_button_toast_off"));
-
-        animateButtonTransition(buttonView, getTargetIcon());
     }
 
     /**
@@ -174,7 +189,7 @@ public class LoopVideoButton {
     private static void applyRange(String startInput, String endInput, long videoLengthMs) {
         final long startMs = parseTime(startInput);
         if (startMs < 0) {
-            Utils.showToastShort(str(videoRangeInvalidTimeStringName));
+            Utils.showSnackbarShort(str(videoRangeInvalidTimeStringName));
             return;
         }
 
@@ -182,14 +197,14 @@ public class LoopVideoButton {
         boolean endIsVideoEnd = endInput.trim().isEmpty();
         if (endIsVideoEnd) {
             if (videoLengthMs <= 0) {
-                Utils.showToastShort(str(videoRangeInvalidTimeStringName));
+                Utils.showSnackbarShort(str(videoRangeInvalidTimeStringName));
                 return;
             }
             endMs = videoLengthMs;
         } else {
             final long parsed = parseTime(endInput);
             if (parsed < 0) {
-                Utils.showToastShort(str(videoRangeInvalidTimeStringName));
+                Utils.showSnackbarShort(str(videoRangeInvalidTimeStringName));
                 return;
             }
             if (videoLengthMs > 0 && parsed >= videoLengthMs) {
@@ -201,7 +216,7 @@ public class LoopVideoButton {
         }
 
         if (endMs <= startMs) {
-            Utils.showToastShort(str(videoRangeInvalidTimeStringName));
+            Utils.showSnackbarShort(str(videoRangeInvalidTimeStringName));
             return;
         }
 
@@ -212,7 +227,7 @@ public class LoopVideoButton {
 
         LoopVideoPatch.setRange(startMs, endMs, endIsVideoEnd);
         Settings.LOOP_VIDEO.save(true);
-        Utils.showToastShort(str("morphe_loop_video_range_toast_on",
+        Utils.showSnackbarShort(str("morphe_loop_video_range_toast_on",
                 formatTime(startMs), formatTime(endMs)));
         updateButtonIcon();
     }
@@ -306,7 +321,7 @@ public class LoopVideoButton {
         editText.setInputType(InputType.TYPE_CLASS_NUMBER);
         // Override the DigitsKeyListener that TYPE_CLASS_NUMBER installs — it strips ':',
         // which breaks the TextWatcher colon auto-insertion.
-        editText.setKeyListener(android.text.method.DigitsKeyListener.getInstance("0123456789:"));
+        editText.setKeyListener(DigitsKeyListener.getInstance("0123456789:"));
         editText.setTextColor(ThemeUtils.getAppForegroundColor());
         editText.setHintTextColor(Color.GRAY);
         editText.setBackgroundColor(Color.TRANSPARENT);
@@ -320,14 +335,14 @@ public class LoopVideoButton {
     }
 
     private static void addAutoColonWatcher(EditText editText) {
-        editText.addTextChangedListener(new android.text.TextWatcher() {
+        editText.addTextChangedListener(new TextWatcher() {
             private boolean isFormatting = false;
 
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
 
             @Override
-            public void afterTextChanged(android.text.Editable s) {
+            public void afterTextChanged(Editable s) {
                 if (isFormatting) return;
                 isFormatting = true;
                 try {
@@ -335,7 +350,7 @@ public class LoopVideoButton {
                     if (digits.length() > 6) digits = digits.substring(0, 6);
                     String formatted = formatDigitsAsTime(digits);
                     s.replace(0, s.length(), formatted);
-                    android.text.Selection.setSelection(s, formatted.length());
+                    Selection.setSelection(s, formatted.length());
                 } finally {
                     isFormatting = false;
                 }

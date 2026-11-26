@@ -22,6 +22,10 @@ import com.android.tools.smali.dexlib2.Opcode
  * Autoplay overlay method that compares the time since the last user interaction against the
  * server provided inactivity limit (in minutes). Once the limit is exceeded autoplay stops
  * counting down and the next video is not started.
+ *
+ * Right after the comparison the method checks whether something holds an autoplay block
+ * (dialogs, bottom sheets, watch list scrolled past the first item...). A held block also
+ * stops the countdown.
  */
 internal object AutoplayInactivityLimitFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -45,11 +49,49 @@ internal object AutoplayInactivityLimitFingerprint : Fingerprint(
             opcode(Opcode.IF_GEZ), // 21.40+
             location = MatchAfterImmediately()
         ),
+        // Autoplay block check.
+        methodCall(
+            parameters = listOf(),
+            returnType = "Z",
+            location = MatchAfterWithin(3)
+        ),
+        opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately()),
+        opcode(Opcode.IF_NEZ, location = MatchAfterImmediately()),
         methodCall(
             opcode = Opcode.INVOKE_STATIC,
             definingClass = "Landroid/animation/ObjectAnimator;",
             name = "ofObject"
         )
+    )
+)
+
+// Playback progress can trigger the prompt independently of the autoplay overlay.
+internal object InactivityLimitFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf("Ljava/lang/Object;"),
+    filters = listOf(
+        literal(126827209L),
+        fieldAccess(
+            opcode = Opcode.SGET_OBJECT,
+            definingClass = "Ljava/util/concurrent/TimeUnit;",
+            name = "SECONDS"
+        ),
+        methodCall(
+            opcode = Opcode.INVOKE_VIRTUAL,
+            definingClass = "Ljava/util/concurrent/TimeUnit;",
+            name = "toMillis",
+            location = MatchAfterWithin(5)
+        ),
+        opcode(Opcode.CMP_LONG, location = MatchAfterWithin(2)),
+        opcode(Opcode.IF_LEZ, location = MatchAfterImmediately()),
+        fieldAccess(
+            opcode = Opcode.SGET_OBJECT,
+            definingClass = "Ljava/util/concurrent/TimeUnit;",
+            name = "MILLISECONDS",
+            location = MatchAfterImmediately()
+        ),
+        opcode(Opcode.IF_GTZ, location = MatchAfterWithin(20))
     )
 )
 
@@ -76,7 +118,7 @@ internal object AutoplayConfirmDialogEnabledFingerprint : Fingerprint(
         ),
         methodCall(
             opcode = Opcode.INVOKE_VIRTUAL,
-            definingClass = $$"Lj$/util/Optional;",
+            definingClass = "Lj$/util/Optional;",
             name = "isPresent",
             location = MatchAfterWithin(6)
         )
@@ -105,7 +147,7 @@ internal object AutoplayConfirmDialogEnabledLegacyFingerprint : Fingerprint(
         ),
         methodCall(
             opcode = Opcode.INVOKE_VIRTUAL,
-            definingClass = $$"Lj$/util/Optional;",
+            definingClass = "Lj$/util/Optional;",
             name = "isPresent",
             location = MatchAfterWithin(6)
         )

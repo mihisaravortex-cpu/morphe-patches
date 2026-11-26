@@ -16,14 +16,16 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLa
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.methodCall
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.patch
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.misc.litho.filter.lithoFilterPatch
+import app.morphe.patches.music.misc.proto.elementProtoParserHookPatch
 import app.morphe.patches.music.misc.settings.PreferenceScreen
 import app.morphe.patches.music.misc.settings.settingsPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.patches.shared.ad.hideFullscreenAdsPatch
 import app.morphe.patches.shared.misc.litho.filter.addLithoFilter
+import app.morphe.patches.shared.misc.proto.hookElement
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.util.indexOfFirstInstructionOrThrow
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
@@ -32,8 +34,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 private const val ADS_FILTER = "Lapp/morphe/extension/music/patches/components/AdsFilter;"
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/music/patches/HideAdsPatch;"
 
-@Suppress("unused")
-val hideAdsPatch = bytecodePatch(
+val hideAdsPatch = patch(
     name = "Hide ads",
     description = "Adds options to hide fullscreen ads, Premium promotions and video ads."
 ) {
@@ -41,6 +42,7 @@ val hideAdsPatch = bytecodePatch(
         sharedExtensionPatch,
         hideFullscreenAdsPatch(PreferenceScreen.ADS),
         lithoFilterPatch,
+        elementProtoParserHookPatch,
         settingsPatch
     )
 
@@ -98,7 +100,24 @@ val hideAdsPatch = bytecodePatch(
             """
         )
 
+        // Hide the ad overlay drawn over the player while an ad plays on a cast device.
+        AdOverlayInflateFingerprint.let {
+            it.method.apply {
+                val findViewByIdIndex = it.instructionMatches.last().index
+                val overlayRootRegister =
+                    getInstruction<FiveRegisterInstruction>(findViewByIdIndex).registerC
+
+                addInstruction(
+                    findViewByIdIndex,
+                    "invoke-static { v$overlayRootRegister }, $EXTENSION_CLASS->" +
+                            "hideAdOverlay(Landroid/view/ViewGroup;)V"
+                )
+            }
+        }
+
         // Hide Music Premium promotions
+        hookElement("$EXTENSION_CLASS->hideMenuItemPremiumPromo")
+
         FloatingLayoutFingerprint.method.apply {
             val insertIndex = FloatingLayoutFingerprint.instructionMatches.last().index
             val viewRegister = getInstruction<OneRegisterInstruction>(insertIndex).registerA

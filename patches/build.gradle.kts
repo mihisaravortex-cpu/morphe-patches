@@ -1,10 +1,16 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+plugins {
+    // Fails the build if patch code uses JDK APIs that do not exist on Android.
+    alias(libs.plugins.animalsniffer)
+}
+
 group = "app.morphe"
 
 patches {
     about {
-        name = "Morphe Patches"
+        // Pull request builds pass -PpatchesName to tell test builds apart from releases.
+        name = providers.gradleProperty("patchesName").getOrElse("Morphe Patches")
         description = "Patches for Morphe"
         source = "git@github.com:MorpheApp/morphe-patches.git"
         author = "MorpheApp"
@@ -56,21 +62,74 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.core)
+    testImplementation(libs.protobuf.javalite)
     testRuntimeOnly(libs.junit.jupiter.engine)
+
+    // Android API level 26 is the minimum API the patches are compiled for (see buildAndroid).
+    signature(libs.android.api.signature) { artifact { type = "signature" } }
+}
+
+animalsniffer {
+    // Only the main source set ships in the patches file.
+    sourceSets = listOf(project.sourceSets["main"])
+}
+
+// The translated strings of addresources, converted to JSON at build time by the converter of
+// addResourcesPatch, so patching only copies them. Each locale and app gets a file of its own.
+val addResourcesJson = tasks.register<JavaExec>("addResourcesJson") {
+    description = "Converts the translated addresources strings to JSON"
+
+    val source = layout.projectDirectory.dir("src/main/resources/addresources")
+    val output = layout.buildDirectory.dir("generated/addresources-json")
+    inputs.dir(source)
+    outputs.dir(output)
+
+    // The compiled patches alone, as the main runtime classpath would need processResources.
+    classpath = files(sourceSets["main"].output.classesDirs, configurations.runtimeClasspath)
+    mainClass.set("app.morphe.patches.all.misc.resources.TranslationsJson")
+    args(source.asFile.path, output.get().asFile.path)
+}
+
+sourceSets.main {
+    resources.srcDir(addResourcesJson)
 }
 
 tasks {
+    processResources {
+        // Patching takes the translated strings from the JSON files.
+        exclude("addresources/values-*/*/strings.xml")
+    }
+
     test {
         useJUnitPlatform()
+        dependsOn(":extensions:youtube:generateReleaseProto", ":extensions:youtube:compileReleaseJavaWithJavac")
         jamApk.orNull?.let { systemProperty("jamApk", it) }
+        // The Android-boundary tests load release bytecode in isolated class loaders.
+        // Declare those actual classes as inputs so runtime changes invalidate cached results.
+        inputs.dir(rootProject.file(
+            "extensions/youtube/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes"
+        )).withPropertyName("queueRuntimeClasses").withNormalizer(ClasspathNormalizer::class)
+        inputs.file(rootProject.file(
+            "extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/OpenVideosFullscreenHookPatch.java"
+        )).withPropertyName("queueFullscreenBoundarySource")
+        inputs.files(
+            rootProject.file("extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/queue/QueueSaveActions.java"),
+            rootProject.file("extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/queue/QueueSaveFeedback.java"),
+            rootProject.file("extensions/youtube/src/main/proto/app/morphe/extension/youtube/innertube/playlist_queue.proto"),
+            rootProject.file("extensions/youtube/src/main/proto/app/morphe/extension/youtube/innertube/icon.proto")
+        ).withPropertyName("queueSaveBoundarySources")
     }
 
     register<JavaExec>("checkStringResources") {
         description = "Checks resource strings for invalid formatting"
 
-        dependsOn(build)
-
-        classpath = sourceSets["main"].runtimeClasspath
+        // Only the compiled patches and the raw string resources are needed. Using the full
+        // main runtime classpath would run processResources, which builds and minifies all extensions.
+        classpath = files(
+            sourceSets["main"].output.classesDirs,
+            configurations.runtimeClasspath,
+            layout.projectDirectory.dir("src/main/resources"),
+        )
         mainClass.set("app.morphe.patches.util.resource.CheckStringResourcesKt")
     }
 
@@ -97,6 +156,43 @@ tasks {
             setArgs(listOfNotNull(apk, jamOutput.orNull))
         }
     }
+
+    register<JavaExec>("validateAndroidAutoThirdPartyApps") {
+        description = "Patches a supplied YouTube Music APK for Android Auto third-party apps validation"
+        group = "verification"
+
+        dependsOn("testClasses")
+        classpath = sourceSets["test"].runtimeClasspath
+        mainClass.set("app.morphe.patches.music.misc.androidauto.AndroidAutoThirdPartyAppsDeviceBuildKt")
+
+        doFirst {
+            val apk = providers.gradleProperty("androidAutoThirdPartyAppsApk").orNull
+                ?: throw GradleException("validateAndroidAutoThirdPartyApps requires -PandroidAutoThirdPartyAppsApk=/absolute/path/to/ytm.apk")
+            val output = providers.gradleProperty("androidAutoThirdPartyAppsOutput").orNull
+            setArgs(listOfNotNull(apk, output))
+        }
+    }
+
+    register<JavaExec>("validatePlaylistQueue") {
+        description = "Applies Native playlist queue to a stock APK and verifies it with Android SDK tools"
+        group = "verification"
+        dependsOn("testClasses")
+        classpath = sourceSets["test"].runtimeClasspath
+        mainClass.set("app.morphe.patches.youtube.interaction.nativeplaylistqueue.PlaylistQueueApkBuildKt")
+        doFirst {
+            val apk = providers.gradleProperty("playlistQueueApk").orNull
+                ?: throw GradleException("validatePlaylistQueue requires -PplaylistQueueApk=/absolute/path/youtube.apk")
+            val mode = providers.gradleProperty("playlistQueueMode").getOrElse("standalone")
+            val output = providers.gradleProperty("playlistQueueOutput").orNull
+            setArgs(listOfNotNull(apk, mode, output))
+        }
+    }
+
+    // The check task already runs it, but buildAndroid does not depend on check.
+    named("buildAndroid") {
+        dependsOn("animalsnifferMain")
+    }
+
     // Used by gradle-semantic-release-plugin.
     publish {
         dependsOn("generatePatchesList")

@@ -12,13 +12,25 @@ package app.morphe.extension.youtube.patches;
 
 import static app.morphe.extension.shared.StringRef.str;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ObjectAnimator;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
-import android.net.Uri;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.drawable.ColorDrawable;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.SparseArray;
 import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
+import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 import android.view.ViewStub;
 import android.view.WindowInsets;
 import android.widget.ImageView;
@@ -29,44 +41,65 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.google.android.apps.youtube.app.application.Shell_SettingsActivity;
-import com.google.android.gms.common.api.GoogleApiActivity;
 import com.google.protobuf.ExtensionRegistryLite;
 import com.google.protobuf.MessageLite;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.WeakHashMap;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.ResourceType;
 import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
-import app.morphe.extension.shared.settings.BaseActivityHook;
-import app.morphe.extension.shared.settings.IntegerSetting;
+import app.morphe.extension.shared.settings.Setting;
+import app.morphe.extension.shared.settings.StringSetting;
 import app.morphe.extension.shared.ui.Dim;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.Accessibility;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.AccessibilityData;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.ButtonRenderer;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.ButtonRendererAccessibilityData;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.ButtonSheetRenderer;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.Buttons;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.CreationEntrySheetEndpoint;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.CreationMode;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.CreationModesCommand;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.CreationModesControlsRenderer;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.CreationModesControlsRendererHolder;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.CreationModesSwitcherRenderer;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.CreationModesSwitcherRendererHolder;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.NavigationEndpoint;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.PivotBarItemRenderer;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.RendererAccessibilityData;
-import app.morphe.extension.youtube.innertube.IconOuterClass.Icon;
-import app.morphe.extension.youtube.innertube.IconOuterClass.YTIconType;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.Accessibility;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.AccessibilityData;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.BrowseEndpoint;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.ButtonRenderer;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.ButtonRendererAccessibilityData;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.ButtonSheetRenderer;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.Buttons;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.CreationEntrySheetEndpoint;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.CreationMode;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.CreationModesCommand;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.CreationModesControlsRenderer;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.CreationModesControlsRendererHolder;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.CreationModesSwitcherRenderer;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.CreationModesSwitcherRendererHolder;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.NavigationEndpoint;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.NavigationType;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarIconOnlyItemRendererBytes;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarItemBytes;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarItemRenderer;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarItemRendererBytes;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.RendererAccessibilityData;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.Runs;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.SignInEndpoint;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.Title;
+import app.morphe.extension.shared.innertube.IconOuterClass.Icon;
+import app.morphe.extension.shared.innertube.IconOuterClass.YTIconType;
 import app.morphe.extension.youtube.patches.spoof.SpoofOSNamePatch;
 import app.morphe.extension.youtube.settings.Settings;
+import app.morphe.extension.youtube.settings.YouTubeActivityHook;
 import app.morphe.extension.youtube.shared.NavigationBar;
+import app.morphe.extension.youtube.shared.PlayerType;
+import app.morphe.extension.youtube.shared.ShortsPlayerState;
 
 @SuppressWarnings("unused")
 public final class NavigationBarPatch {
@@ -84,7 +117,74 @@ public final class NavigationBarPatch {
 
     private static final boolean SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON = Settings.SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON.get();
 
-    private static final boolean DISABLE_TRANSLUCENT_NAVIGATION = Settings.DISABLE_TRANSLUCENT_NAVIGATION.get();
+    public static final class HideCreateButtonAvailability implements Setting.Availability {
+        @Override
+        public boolean isAvailable() {
+            return !Settings.HIDE_NAVIGATION_BAR.get() && !Settings.SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON.get();
+        }
+
+        @Override
+        public List<Setting<?>> getParentSettings() {
+            return List.of(Settings.HIDE_NAVIGATION_BAR, Settings.SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON);
+        }
+    }
+
+    public static final class HideNotificationsButtonAvailability implements Setting.Availability {
+        @Override
+        public boolean isAvailable() {
+            return !Settings.HIDE_NAVIGATION_BAR.get() && Settings.SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON.get();
+        }
+
+        @Override
+        public List<Setting<?>> getParentSettings() {
+            return List.of(Settings.HIDE_NAVIGATION_BAR, Settings.SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON);
+        }
+    }
+
+    public enum NavigationBarStyle {
+        /**
+         * The feature flags of the translucent navigation bar are left to the account,
+         * and the fixes for what they break are off.
+         */
+        DEFAULT,
+        TRANSLUCENT,
+        /**
+         * Translucent, without the blurred background.
+         */
+        TRANSPARENT,
+        /**
+         * Transparent, painted over with the app background.
+         */
+        OPAQUE
+    }
+
+    /**
+     * The flags of the translucent navigation bar are also overridden without this patch,
+     * see {@link #isNavigationBarBehindSystemButtons(boolean)}. They are then left to the account.
+     * <p>
+     * The glass navigation bar floats over the pages, so with the default style it uses the translucent
+     * style, which lays the pages out behind the navigation bar. Otherwise, for an account without the
+     * translucent navigation bar, the pages end above the navigation bar, and the room around the capsule
+     * and behind the system navigation buttons is an empty band.
+     */
+    private static final NavigationBarStyle NAVIGATION_BAR_STYLE = !isPatchIncluded()
+            ? NavigationBarStyle.DEFAULT
+            : Settings.NAVIGATION_BAR_STYLE.get() == NavigationBarStyle.DEFAULT
+                    && Settings.NAVIGATION_BAR_GLASS.get() && !Settings.HIDE_NAVIGATION_BAR.get()
+                    ? NavigationBarStyle.TRANSLUCENT
+                    : Settings.NAVIGATION_BAR_STYLE.get();
+
+    /**
+     * The glass navigation bar floats over the pages, so the pages are laid out behind it also where it does not
+     * cover the system navigation buttons, such as before Android 12, where the window is not drawn behind them,
+     * or without the edge to edge top bar before Android 15. Otherwise, the room around the capsule is an empty band
+     * (<a href="https://github.com/MorpheApp/morphe-patches/issues/4413">...</a>).
+     * Only the pages are laid out behind it: the navigation bar still covers the system navigation buttons only
+     * where the window is drawn behind them, see {@link #isNavigationBarBehindSystemButtons(boolean)}.
+     */
+    private static final boolean PAGES_BEHIND_GLASS_NAVIGATION_BAR = isPatchIncluded()
+            && Settings.NAVIGATION_BAR_GLASS.get() && !Settings.HIDE_NAVIGATION_BAR.get()
+            && NAVIGATION_BAR_STYLE != NavigationBarStyle.OPAQUE;
 
     private static final boolean NARROW_NAVIGATION_BUTTONS = Settings.NARROW_NAVIGATION_BUTTONS.get();
 
@@ -115,6 +215,7 @@ public final class NavigationBarPatch {
             ? ResourceUtils.getIdentifier(ResourceType.ID, "new_content_dot")
             : 0;
 
+    @SuppressWarnings("SameReturnValue")
     public static boolean isPatchIncluded() {
         return false;
     }
@@ -130,24 +231,52 @@ public final class NavigationBarPatch {
      * Injection point.
      */
     public static void navigationTabCreated(NavigationBar.NavigationButton button, View tabView) {
+        YouTubeGlassNavigationBar.navigationTabCreated(button, tabView);
+
+        if (button == NavigationBar.NavigationButton.NOTIFICATIONS) {
+            notificationsTabCreated = true;
+        }
+
         if (SHOW_SEARCH_BUTTON && button == NavigationBar.NavigationButton.SEARCH) {
             Utils.runOnMainThread(() -> tabView.setOnClickListener(openSearchBarOnClickListener));
             return;
         }
 
         if (SHOW_SETTINGS_BUTTON && button == NavigationBar.NavigationButton.SETTINGS) {
-            Utils.runOnMainThread(() -> tabView.setOnClickListener(v -> {
+            settingsTabRef = new WeakReference<>(tabView);
+            Utils.runOnMainThread(() -> {
                 if (SHOW_SETTINGS_BUTTON_TYPE) {
-                    openMorpheSettings(v);
+                    tabView.setOnClickListener(NavigationBarPatch::openMorpheSettings);
+                    setTabLongPressAction(tabView, NavigationBarPatch::openYouTubeSettings);
                 } else {
-                    openYouTubeSettings(v);
+                    tabView.setOnClickListener(NavigationBarPatch::openYouTubeSettings);
+                    setTabLongPressAction(tabView, NavigationBarPatch::openMorpheSettings);
                 }
-            }));
+            });
             return;
         }
 
-        if (HIDE_NAVIGATION_NEW_CONTENT_DOT) {
-            hideNewContentDot(tabView);
+        if (YOU_BUTTON_ACCOUNT_SWITCHER && button == NavigationBar.NavigationButton.LIBRARY) {
+            youTabRef = new WeakReference<>(tabView);
+            // The app sets its own long press listener on the button after the button is created.
+            Utils.runOnMainThread(() -> setTabLongPressAction(tabView, NavigationBarPatch::openAccountSwitcher));
+        }
+
+        // The dot is a stub that is inflated when the tab has new content, and the app shows and
+        // hides it again later. It is hidden right before every draw, so no frame shows it. The
+        // theme patch keeps the color of the dot the same way.
+        if (HIDE_NAVIGATION_NEW_CONTENT_DOT && newContentDotId != 0) {
+            try {
+                tabView.getViewTreeObserver().addOnPreDrawListener(() -> {
+                    View dot = tabView.findViewById(newContentDotId);
+                    if (dot != null && !(dot instanceof ViewStub) && dot.getVisibility() == View.VISIBLE) {
+                        dot.setVisibility(View.INVISIBLE);
+                    }
+                    return true;
+                });
+            } catch (Exception ex) {
+                Logger.printException(() -> "navigationTabCreated new content dot failure", ex);
+            }
         }
 
         if (Boolean.TRUE.equals(shouldHideMap.get(button))) {
@@ -163,29 +292,6 @@ public final class NavigationBarPatch {
     }
 
     /**
-     * The dot is a stub that is inflated when the tab has new content, and the app shows and
-     * hides it again later. It is hidden right before every draw, so no frame shows it. The
-     * theme patch keeps the color of the dot the same way.
-     */
-    private static void hideNewContentDot(View tabView) {
-        try {
-            if (newContentDotId == 0) {
-                return;
-            }
-
-            tabView.getViewTreeObserver().addOnPreDrawListener(() -> {
-                View dot = tabView.findViewById(newContentDotId);
-                if (dot != null && !(dot instanceof ViewStub) && dot.getVisibility() == View.VISIBLE) {
-                    dot.setVisibility(View.INVISIBLE);
-                }
-                return true;
-            });
-        } catch (Exception ex) {
-            Logger.printException(() -> "hideNewContentDot failure", ex);
-        }
-    }
-
-    /**
      * Injection point.
      */
     public static boolean useAnimatedNavigationButtons(boolean original) {
@@ -194,9 +300,11 @@ public final class NavigationBarPatch {
 
     /**
      * Injection point.
+     * <p>
+     * The glass navigation bar sets the width of the buttons itself, from their content and spacing.
      */
     public static boolean enableNarrowNavigationButton(boolean original) {
-        return NARROW_NAVIGATION_BUTTONS || original;
+        return (NARROW_NAVIGATION_BUTTONS && !YouTubeGlassNavigationBar.isEnabled()) || original;
     }
 
     /**
@@ -207,40 +315,417 @@ public final class NavigationBarPatch {
     }
 
     /**
-     * Injection point.
+     * Feed scroll behavior of the navigation bar of a page that does not set it, with which it is always shown.
      */
-    public static void hideNavigationBar(View view) {
-        Utils.hideViewUnderCondition(HIDE_NAVIGATION_BAR, view);
+    private static final int FEED_SCROLL_KEEPS_NAVIGATION_BAR = 1;
+
+    /**
+     * Injection point.
+     * <p>
+     * The server sets for each feed page if the app hides the navigation bar while scrolling, and how
+     * the app hides it depends on the account, so some accounts never get the bar hidden.
+     * The app never hides it, and the bar is hidden while scrolling by {@link #onListScrolled(View, int)}.
+     */
+    @SuppressWarnings("SameReturnValue")
+    public static int getFeedScrollNavigationBarBehavior() {
+        return FEED_SCROLL_KEEPS_NAVIGATION_BAR;
+    }
+
+    /**
+     * If the navigation bar is hidden while scrolling the pages.
+     */
+    private static final boolean HIDE_NAVIGATION_BAR_ON_SCROLL = !DISABLE_AUTO_HIDE_NAVIGATION_BAR && !HIDE_NAVIGATION_BAR;
+
+    private static final long NAVIGATION_BAR_SCROLL_ANIMATION_MILLISECONDS = 250;
+
+    /**
+     * Bottom bar container, which holds the navigation bar of any layout the app uses.
+     */
+    private static WeakReference<View> bottomBarContainerRef = new WeakReference<>(null);
+
+    /**
+     * Distance the lists scrolled in the same direction since the last change, accessed only on the main thread.
+     */
+    private static int listScrollDistance;
+
+    /**
+     * Distance in pixels a touch can move before it scrolls, or -1 if not yet read.
+     */
+    private static int listScrollTouchSlop = -1;
+
+    /**
+     * If the navigation bar is hidden by scrolling, accessed only on the main thread.
+     */
+    private static boolean navigationBarHiddenOnScroll;
+
+    @Nullable
+    private static ObjectAnimator navigationBarScrollAnimator;
+
+    private static boolean navigationBarScrollObserversAdded;
+
+    /**
+     * Container of the pages, whose bottom padding is the room the app leaves for the navigation bar
+     * when the pages are not laid out behind it.
+     */
+    private static final int paneFragmentContainerId = HIDE_NAVIGATION_BAR_ON_SCROLL
+            ? ResourceUtils.getIdentifier(ResourceType.ID, "pane_fragment_container")
+            : 0;
+
+    /**
+     * Container of the pages whose room for the navigation bar was removed while the bar is hidden,
+     * the room removed, and the padding it was left with.
+     */
+    private static WeakReference<View> pageRoomViewRef = new WeakReference<>(null);
+    private static int pageRoomRemoved;
+    private static int pageRoomPadding;
+
+    /**
+     * The heights the app keeps of the views at the bottom of the screen, with a method added during patching.
+     */
+    public interface BottomUiHeightsAccess {
+        /**
+         * Sets the height of a view at the bottom of the screen.
+         */
+        void patch_setBottomUiHeight(Enum<?> view, int height);
+    }
+
+    /**
+     * Name of the navigation bar in the views at the bottom of the screen.
+     */
+    private static final String BOTTOM_UI_NAVIGATION_BAR = "PIVOT_BAR";
+
+    /**
+     * The navigation bar in the views at the bottom of the screen.
+     */
+    @Nullable
+    private static Enum<?> bottomUiNavigationBar;
+
+    /**
+     * The heights the app set the height of the navigation bar in, as it keeps the heights in more than one place,
+     * each with the last height the app set. Accessed only on the main thread.
+     */
+    private static final Map<BottomUiHeightsAccess, Integer> bottomUiNavigationBarHeights = new WeakHashMap<>();
+
+    /**
+     * Injection point.
+     * <p>
+     * The app places the miniplayer and other views above the height it keeps for the navigation bar,
+     * which it sets to none only when it hides the bar itself. While the bar is hidden on scroll,
+     * the height of the bar is none.
+     *
+     * @return The height of the view to set.
+     */
+    public static int getBottomUiHeight(BottomUiHeightsAccess heights, Enum<?> view, int height) {
+        if (!HIDE_NAVIGATION_BAR_ON_SCROLL) return height;
+
+        try {
+            if (view != bottomUiNavigationBar) {
+                if (!BOTTOM_UI_NAVIGATION_BAR.equals(view.name())) return height;
+                bottomUiNavigationBar = view;
+            }
+            bottomUiNavigationBarHeights.put(heights, height);
+            return navigationBarHiddenOnScroll ? 0 : height;
+        } catch (Exception ex) {
+            Logger.printException(() -> "getBottomUiHeight failure", ex);
+        }
+
+        return height;
     }
 
     /**
      * Injection point.
      * <p>
+     * Called on the main thread when any list scrolls, before its scroll listeners.
+     * The navigation bar is hidden when the list of a page scrolls down, and shown when it scrolls up.
+     *
+     * @param dy The vertical distance scrolled, more than zero when scrolling down.
+     */
+    public static void onListScrolled(View list, int dy) {
+        if (!HIDE_NAVIGATION_BAR_ON_SCROLL || dy == 0) return;
+
+        try {
+            if ((dy > 0) != (listScrollDistance > 0)) {
+                listScrollDistance = 0;
+            }
+            listScrollDistance += dy;
+            if (listScrollTouchSlop < 0) {
+                listScrollTouchSlop = ViewConfiguration.get(list.getContext()).getScaledTouchSlop();
+            }
+            if (Math.abs(listScrollDistance) < listScrollTouchSlop) return;
+
+            final boolean hide = listScrollDistance > 0;
+            listScrollDistance = 0;
+            if (hide == navigationBarHiddenOnScroll) return;
+
+            View container = bottomBarContainerRef.get();
+            if (container == null || (hide && !canHideNavigationBarOnScroll(list, container))) return;
+
+            if (!navigationBarScrollObserversAdded) {
+                navigationBarScrollObserversAdded = true;
+                // Opening the player, the Shorts, or another tab shows the navigation bar again.
+                // The feed videos that play while scrolling, and the miniplayer, do not.
+                PlayerType.getOnChange().addObserver(type -> {
+                    if (!type.isNoneHiddenOrMinimized() && type != PlayerType.INLINE_MINIMAL) {
+                        Utils.runOnMainThreadNowOrLater(NavigationBarPatch::showNavigationBarHiddenOnScroll);
+                    }
+                });
+                ShortsPlayerState.getOnChange().addObserver(open ->
+                        Utils.runOnMainThreadNowOrLater(NavigationBarPatch::showNavigationBarHiddenOnScroll));
+                NavigationBar.addOnNavigationButtonChangedListener(button ->
+                        Utils.runOnMainThreadNowOrLater(NavigationBarPatch::showNavigationBarHiddenOnScroll));
+            }
+            animateNavigationBarOnScroll(container, list, hide);
+        } catch (Exception ex) {
+            Logger.printException(() -> "onListScrolled failure", ex);
+        }
+    }
+
+    /**
+     * Only the lists of the pages behind or above the navigation bar hide it, also while the miniplayer is shown,
+     * not the lists of the player, the Shorts or other windows, and not the navigation rail along the side.
+     */
+    private static boolean canHideNavigationBarOnScroll(View list, View container) {
+        PlayerType playerType = PlayerType.getCurrent();
+        if ((!playerType.isNoneHiddenOrMinimized() && playerType != PlayerType.INLINE_MINIMAL) || ShortsPlayerState.isOpen()) {
+            return false;
+        }
+        if (!container.isShown() || !list.isShown() || list.getRootView() != container.getRootView()
+                || container.getWidth() < container.getHeight()) {
+            return false;
+        }
+
+        int[] location = new int[2];
+        list.getLocationOnScreen(location);
+        final int listBottom = location[1] + list.getHeight();
+        container.getLocationOnScreen(location);
+        return listBottom >= location[1];
+    }
+
+    /**
+     * The navigation bar slides out of the screen, and is then removed from the layout, as the app does
+     * when it hides the bar. It is added back before it slides in.
+     * The page fills the room of the bar while the bar slides over it, so the room is removed before the bar
+     * slides out, and added back after the bar has slid in. Otherwise, the empty room shows behind the sliding bar.
+     */
+    private static void animateNavigationBarOnScroll(View container, View list, boolean hide) {
+        navigationBarHiddenOnScroll = hide;
+        ObjectAnimator running = navigationBarScrollAnimator;
+        if (running != null) {
+            running.cancel();
+        }
+        setBottomUiNavigationBarHeight();
+
+        if (hide) {
+            removePageRoom(list, container);
+        } else {
+            if (container.getVisibility() == View.GONE) {
+                container.setTranslationY(container.getHeight());
+            }
+            container.setVisibility(View.VISIBLE);
+        }
+        ObjectAnimator animator = ObjectAnimator.ofFloat(container, View.TRANSLATION_Y,
+                hide ? container.getHeight() : 0);
+        animator.setDuration(NAVIGATION_BAR_SCROLL_ANIMATION_MILLISECONDS);
+        animator.addListener(new AnimatorListenerAdapter() {
+            private boolean cancelled;
+
+            @Override
+            public void onAnimationCancel(Animator animation) {
+                cancelled = true;
+            }
+
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (cancelled) return;
+                if (hide) {
+                    container.setVisibility(View.GONE);
+                } else {
+                    restorePageRoom();
+                }
+            }
+        });
+        navigationBarScrollAnimator = animator;
+        animator.start();
+    }
+
+    /**
+     * Shows at once the navigation bar hidden by scrolling. Called on the main thread.
+     */
+    private static void showNavigationBarHiddenOnScroll() {
+        if (!navigationBarHiddenOnScroll) return;
+
+        try {
+            navigationBarHiddenOnScroll = false;
+            listScrollDistance = 0;
+            ObjectAnimator running = navigationBarScrollAnimator;
+            if (running != null) {
+                running.cancel();
+            }
+            restorePageRoom();
+            setBottomUiNavigationBarHeight();
+            View container = bottomBarContainerRef.get();
+            if (container != null) {
+                container.setTranslationY(0);
+                container.setVisibility(View.VISIBLE);
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "showNavigationBarHiddenOnScroll failure", ex);
+        }
+    }
+
+    /**
+     * Sets again the height of the navigation bar the app last set, which is none while the bar is hidden on scroll.
+     */
+    private static void setBottomUiNavigationBarHeight() {
+        Enum<?> view = bottomUiNavigationBar;
+        if (view == null) return;
+
+        for (Map.Entry<BottomUiHeightsAccess, Integer> entry : new ArrayList<>(bottomUiNavigationBarHeights.entrySet())) {
+            BottomUiHeightsAccess heights = entry.getKey();
+            if (heights != null) {
+                heights.patch_setBottomUiHeight(view, entry.getValue());
+            }
+        }
+    }
+
+    /**
+     * The pages that are not laid out behind the navigation bar keep the room for it below them,
+     * which the app removes only when it hides the bar itself. The room of the bar is removed from the
+     * container of the pages of the scrolled list, so the page fills the room the bar leaves while it slides out.
+     */
+    private static void removePageRoom(View list, View container) {
+        // The room is still removed if the bar was hidden again before it had slid in.
+        if (pageRoomViewRef.get() != null) return;
+
+        for (View view = list; view != null; view = view.getParent() instanceof View parent ? parent : null) {
+            if (view.getId() != paneFragmentContainerId) continue;
+
+            final int padding = view.getPaddingBottom();
+            final int removed = Math.min(padding, container.getHeight());
+            if (removed > 0) {
+                pageRoomViewRef = new WeakReference<>(view);
+                pageRoomRemoved = removed;
+                pageRoomPadding = padding - removed;
+                view.setPadding(view.getPaddingLeft(), view.getPaddingTop(), view.getPaddingRight(), pageRoomPadding);
+            }
+            return;
+        }
+    }
+
+    /**
+     * The room of the navigation bar is added back, unless the app set another room meanwhile.
+     */
+    private static void restorePageRoom() {
+        View view = pageRoomViewRef.get();
+        pageRoomViewRef = new WeakReference<>(null);
+        if (view != null && view.getPaddingBottom() == pageRoomPadding) {
+            view.setPadding(view.getPaddingLeft(), view.getPaddingTop(), view.getPaddingRight(),
+                    pageRoomPadding + pageRoomRemoved);
+        }
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Before 21.20 this flag also hides the navigation bar while scrolling, whatever the page sets,
+     * so it is turned off and only {@link #getFeedScrollNavigationBarBehavior()} decides.
+     */
+    @SuppressWarnings("SameReturnValue")
+    public static boolean useAutoHideNavigationBarFlag(boolean original) {
+        return false;
+    }
+
+    /**
+     * Injection point.
+     */
+    public static void hideNavigationBar(View view) {
+        // The navigation bar of a recreated activity is shown.
+        if (bottomBarContainerRef.get() != view) {
+            showNavigationBarHiddenOnScroll();
+        }
+        bottomBarContainerRef = new WeakReference<>(view);
+        Utils.hideViewUnderCondition(HIDE_NAVIGATION_BAR, view);
+    }
+
+    /**
+     * Value of the navigation bar covering the system navigation buttons flag first read by the app,
+     * or null if not read yet.
+     */
+    @Nullable
+    private static volatile Boolean accountCoversSystemButtons;
+
+    /**
+     * Value of the feed behind the navigation bar flag first read by the app, or null if not read yet.
+     */
+    @Nullable
+    private static volatile Boolean accountFeedBehindNavigationBar;
+
+    /**
+     * Value of the blurred, translucent background flag first read by the app with
+     * {@link NavigationBarStyle#DEFAULT}, or null if not read yet.
+     */
+    @Nullable
+    private static volatile Boolean accountTranslucentBackground;
+
+    /**
+     * Value of the translucent navigation bar style flag first read by the app with
+     * {@link NavigationBarStyle#DEFAULT}, or null if not read yet.
+     */
+    @Nullable
+    private static volatile Boolean accountTranslucentStyle;
+
+    /**
      * The translucent navigation bar comes from feature flags that not every account gets, so they
-     * are turned on to make the bar look the same on every account. With them, the navigation bar
-     * and the pages make room for the system navigation buttons, which is only right when
-     * the window is drawn behind them. That comes from the edge to edge top bar feature flag,
-     * so without it the room is added twice: the navigation bar is raised and an empty bar is left
-     * at the bottom (https://github.com/MorpheApp/morphe-patches/issues/3825).
+     * are turned on to make the bar look the same on every account. With the navigation bar covering
+     * the system navigation buttons and the feed laid out behind it, the navigation bar and the pages
+     * make room for the system navigation buttons, which is only right when the window is drawn behind
+     * them. That comes from the edge to edge top bar feature flag, so without it the room is added twice:
+     * the navigation bar is raised and an empty bar is left at the bottom
+     * (<a href="https://github.com/MorpheApp/morphe-patches/issues/3825">...</a>), or the pages and
+     * the Shorts player end the height of the navigation bar above it
+     * (<a href="https://github.com/MorpheApp/morphe-patches/issues/4159">...</a>,
+     * <a href="https://github.com/MorpheApp/morphe-patches/issues/4173">...</a>).
      * <p>
      * The app draws the window behind the system navigation buttons only on Android 12 and later,
      * so on older versions the flags are always turned off, or the room is added twice
-     * (https://github.com/MorpheApp/morphe-patches/issues/3864).
+     * (<a href="https://github.com/MorpheApp/morphe-patches/issues/3864">...</a>).
+     * <p>
+     * Android 15 and later always draw the window of the app behind the system navigation buttons,
+     * as the app targets Android 15 or later, so there the flags do not need the edge to edge top bar.
+     * The Hide status bar patch turns that flag off, and the pages then ended above the navigation bar,
+     * with an empty band behind the translucent navigation bar and the system navigation buttons.
+     * <p>
+     * With {@link NavigationBarStyle#DEFAULT} the flags are left to the account, but they are still
+     * turned off if the window is not drawn behind the system navigation buttons.
+     *
+     * @param original The value the account first got, so all the classes that read the flag
+     *                 use the same value even if the account value changes while the app starts,
+     *                 the same as the edge to edge top bar flag.
      */
-    public static boolean useTranslucentNavigationBar(boolean original) {
+    private static boolean isNavigationBarBehindSystemButtons(boolean original) {
         try {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            // Some devices keep the window above the system navigation buttons also with the edge
+            // to edge layout, as found at a previous app start by the Hide status bar patch.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || HideStatusBarPatch.isWindowAboveNavigationBar()) {
                 return false;
             }
 
-            Boolean edgeToEdge = HideStatusBarPatch.isEdgeToEdgeTopBar();
-            if (edgeToEdge == null) {
-                // Not read yet, or the Hide status bar patch is not included.
-                return original;
+            final boolean windowBehindSystemButtons;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                windowBehindSystemButtons = true;
+            } else {
+                Boolean edgeToEdge = HideStatusBarPatch.isEdgeToEdgeTopBar();
+                // Null if not known yet, or the Hide status bar patch is not included.
+                // The edge to edge layout is then the one of the account, which the flags of the account follow.
+                if (edgeToEdge == null) {
+                    return original;
+                }
+                windowBehindSystemButtons = edgeToEdge;
             }
-            return edgeToEdge;
+
+            return windowBehindSystemButtons && (original || NAVIGATION_BAR_STYLE != NavigationBarStyle.DEFAULT);
         } catch (Exception ex) {
-            Logger.printException(() -> "useTranslucentNavigationBar failure", ex);
+            Logger.printException(() -> "isNavigationBarBehindSystemButtons failure", ex);
             return original;
         }
     }
@@ -248,24 +733,402 @@ public final class NavigationBarPatch {
     /**
      * Injection point.
      * <p>
+     * The navigation bar covers the system navigation buttons, see
+     * {@link #isNavigationBarBehindSystemButtons(boolean)}.
+     */
+    public static boolean useTranslucentNavigationBar(boolean original) {
+        Boolean accountValue = accountCoversSystemButtons;
+        final boolean firstRead = accountValue == null;
+        if (firstRead) {
+            accountValue = original;
+            accountCoversSystemButtons = accountValue;
+        }
+
+        final boolean translucent = isNavigationBarBehindSystemButtons(accountValue);
+        if (firstRead) {
+            Logger.printDebug(() -> "Navigation bar covers system buttons: " + translucent + " (account: " + original
+                    + ", edge to edge: " + HideStatusBarPatch.isEdgeToEdgeTopBar()
+                    + ", window above navigation bar: " + HideStatusBarPatch.isWindowAboveNavigationBar()
+                    + ", style: " + NAVIGATION_BAR_STYLE + ")");
+        }
+        translucentNavigationBarForced = NAVIGATION_BAR_STYLE != NavigationBarStyle.DEFAULT && translucent;
+        navigationBarCoversSystemButtons = translucent;
+        return translucent;
+    }
+
+    /**
+     * If the app was last told the navigation bar covers the system navigation buttons,
+     * with any navigation bar style.
+     */
+    private static volatile boolean navigationBarCoversSystemButtons;
+
+    static boolean isNavigationBarCoveringSystemButtons() {
+        return navigationBarCoversSystemButtons;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The feed is laid out behind the navigation bar. It follows the navigation bar covering
+     * the system navigation buttons: some pages add the navigation bar height below their content
+     * when the navigation bar covers the system navigation buttons, as they are expected to be
+     * laid out behind it, and the list padding for the navigation bar is only set with the edge
+     * to edge layout. See {@link #isNavigationBarBehindSystemButtons(boolean)}.
+     * The pages are always laid out behind the glass navigation bar, see {@link #PAGES_BEHIND_GLASS_NAVIGATION_BAR}.
+     */
+    public static boolean useFeedBehindNavigationBar(boolean original) {
+        Boolean accountValue = accountFeedBehindNavigationBar;
+        final boolean firstRead = accountValue == null;
+        if (firstRead) {
+            accountValue = original;
+            accountFeedBehindNavigationBar = accountValue;
+        }
+
+        final boolean feedBehind = PAGES_BEHIND_GLASS_NAVIGATION_BAR
+                || (isNavigationBarBehindSystemButtons(accountValue) && canPagesBeBehindDefaultNavigationBar());
+        if (firstRead) {
+            Logger.printDebug(() -> "Feed behind navigation bar: " + feedBehind + " (account: " + original
+                    + ", translucent background: " + accountTranslucentBackground
+                    + ", translucent style: " + accountTranslucentStyle + ")");
+        }
+        return feedBehind;
+    }
+
+    /**
+     * The pages are laid out behind the navigation bar only if the bar tells them they can be seen
+     * through it: from Android 12 with its blurred background, otherwise with the translucent style.
+     * With the feed behind the navigation bar flag, the lists get the navigation bar height as bottom
+     * padding, so without them the pages end above the navigation bar and the padding is an empty band
+     * above it (<a href="https://github.com/MorpheApp/morphe-patches/issues/4797">...</a>).
+     * The account can get the feed behind flag without them, such as with the feature flags
+     * of an older app version (Spoof app version).
+     * The other navigation bar styles turn on the background or the style themselves.
+     *
+     * @return False only if the account got neither the blurred background nor the translucent style.
+     */
+    private static boolean canPagesBeBehindDefaultNavigationBar() {
+        return NAVIGATION_BAR_STYLE != NavigationBarStyle.DEFAULT
+                || accountTranslucentBackground != Boolean.FALSE
+                || accountTranslucentStyle != Boolean.FALSE;
+    }
+
+    /**
+     * If {@link #useTranslucentNavigationBar(boolean)} turned the translucent navigation bar on.
+     * The fixes for what its feature flags break are only needed then, and stay off if the flags
+     * are no longer turned on by this patch.
+     */
+    private static volatile boolean translucentNavigationBarForced;
+
+    /**
+     * Injection point.
+     */
+    public static boolean isTranslucentNavigationBarForced() {
+        return translucentNavigationBarForced;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * With the navigation bar covering the system navigation buttons, the room below the bar fixed
+     * at the bottom of some pages, such as the reply bar of the comment replies, already holds
+     * the system navigation buttons. The flag adds the navigation bar height to it as well, so an
+     * empty band is left between the two bars (<a href="https://github.com/MorpheApp/morphe-patches/issues/2300">...</a>).
+     */
+    public static boolean useFixedBottomBarRoom(boolean original) {
+        if (original && translucentNavigationBarForced) {
+            Logger.printVerbose(() -> "useFixedBottomBarRoom turned off");
+            return false;
+        }
+        return original;
+    }
+
+    /**
+     * The container of the scroll to bottom button of the live chat.
+     */
+    private static final int liveChatScrollButtonContainerId = NAVIGATION_BAR_STYLE != NavigationBarStyle.DEFAULT
+            ? ResourceUtils.getIdentifier(ResourceType.ID, "more_comments_icon_container")
+            : 0;
+
+    /**
+     * Injection point.
+     * <p>
+     * The live chat hides its scroll to bottom button by moving it below its container, where the bottom
+     * of the chat cuts it off. With the navigation bar covering the system navigation buttons, the chat
+     * keeps the room for the system navigation buttons below the container, so half of the hidden button
+     * is still shown there (<a href="https://github.com/MorpheApp/morphe-patches/issues/5100">...</a>).
+     * The container cuts the button off at its own bounds instead.
+     */
+    public static void clipLiveChatScrollButton(@Nullable View button) {
+        try {
+            if (translucentNavigationBarForced && button != null
+                    && button.getParent() instanceof View container
+                    && container.getId() == liveChatScrollButtonContainerId) {
+                container.setOutlineProvider(ViewOutlineProvider.BOUNDS);
+                container.setClipToOutline(true);
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "clipLiveChatScrollButton failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The blurred, translucent background of the navigation bar only changes how the bar looks,
+     * not the room left for the system navigation buttons, so it is turned on from Android 12 also
+     * when the window is not drawn edge to edge. With {@link NavigationBarStyle#OPAQUE}, it follows
+     * {@link #isNavigationBarBehindSystemButtons(boolean)} instead. With {@link NavigationBarStyle#DEFAULT}
+     * it is left to the account.
+     */
+    public static boolean useTranslucentNavigationBarBackground(boolean original) {
+        if (NAVIGATION_BAR_STYLE == NavigationBarStyle.DEFAULT) {
+            // The value first read is kept, as for the other flags of the navigation bar,
+            // so the pages are laid out the same way if the account value changes while the app runs.
+            Boolean accountValue = accountTranslucentBackground;
+            if (accountValue == null) {
+                accountValue = original;
+                accountTranslucentBackground = accountValue;
+                Logger.printDebug(() -> "Navigation bar translucent background (account): " + original);
+            }
+            return accountValue;
+        }
+
+        final boolean translucent;
+        if (NAVIGATION_BAR_STYLE != NavigationBarStyle.OPAQUE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            translucent = true;
+        } else {
+            // Before Android 12, the pages are laid out behind the navigation bar only with its translucent background.
+            translucent = PAGES_BEHIND_GLASS_NAVIGATION_BAR || isNavigationBarBehindSystemButtons(original);
+        }
+
+        translucentNavigationBarBackgroundForced = translucent;
+        if (translucent != original) {
+            Logger.printVerbose(() -> "useTranslucentNavigationBarBackground: " + translucent + " (app: " + original + ")");
+        }
+        return translucent;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Before Android 12, the navigation bar tells the pages that they can be seen through it, so they are
+     * laid out behind it, only with this flag and its translucent background, see
+     * {@link #PAGES_BEHIND_GLASS_NAVIGATION_BAR}. From Android 12 its blurred background tells it instead,
+     * and this flag would replace the blurred background with a translucent color, so it is left to the account.
+     */
+    public static boolean useTranslucentNavigationBarStyle(boolean original) {
+        if (NAVIGATION_BAR_STYLE == NavigationBarStyle.DEFAULT) {
+            // The value first read is kept, see useTranslucentNavigationBarBackground.
+            Boolean accountValue = accountTranslucentStyle;
+            if (accountValue == null) {
+                accountValue = original;
+                accountTranslucentStyle = accountValue;
+                Logger.printDebug(() -> "Navigation bar translucent style (account): " + original);
+            }
+            return accountValue;
+        }
+        if (!original && PAGES_BEHIND_GLASS_NAVIGATION_BAR && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            Logger.printVerbose(() -> "useTranslucentNavigationBarStyle turned on");
+            return true;
+        }
+        return original;
+    }
+
+    /**
+     * If {@link #useTranslucentNavigationBarBackground(boolean)} turned the translucent background
+     * of the navigation bar on. The fixes for what the blur and the feed behind the navigation bar
+     * break are only needed then.
+     */
+    private static volatile boolean translucentNavigationBarBackgroundForced;
+
+    /**
+     * Injection point.
+     */
+    public static boolean isTranslucentNavigationBarBackgroundForced() {
+        return translucentNavigationBarBackgroundForced;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The blurred background of the navigation bar draws a copy of the watch layout, so the player
+     * surface is drawn twice in every frame, at two positions. Android 12 and 13 send the two
+     * positions to the surface from two threads at the same time, and the app crashes while
+     * the player moves, such as when it is slowly dragged down to the miniplayer
+     * (<a href="https://github.com/MorpheApp/morphe-patches/pull/3684#issuecomment-6322984709">...</a>).
+     * With {@link NavigationBarStyle#TRANSPARENT} and {@link NavigationBarStyle#OPAQUE} the copy
+     * is not drawn either, so the bar keeps its translucent color, without the blur.
+     *
+     * @param hardwareAccelerated If the canvas is hardware accelerated, which the blur is drawn for.
+     */
+    public static boolean useNavigationBarBlur(boolean hardwareAccelerated) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return false;
+        }
+
+        return hardwareAccelerated && !(translucentNavigationBarBackgroundForced
+                && (NAVIGATION_BAR_STYLE == NavigationBarStyle.TRANSPARENT
+                || NAVIGATION_BAR_STYLE == NavigationBarStyle.OPAQUE));
+    }
+
+    public static int getKeyboardMargin(int original) {
+        return FixPagePaddingPatch.getKeyboardMargin(original);
+    }
+
+    static boolean isKeyboardMarginRemoved() {
+        return FixPagePaddingPatch.isKeyboardMarginRemoved();
+    }
+    /**
+     * Injection point.
+     * <p>
      * When the navigation bar covers the system navigation buttons, the bottom window inset is
      * added to its height and bottom padding. With the keyboard open, that inset also holds
      * the keyboard, so the bar grows as tall as the keyboard and covers the page
-     * (https://github.com/MorpheApp/morphe-patches/issues/3909). The page above then ends
+     * (<a href="https://github.com/MorpheApp/morphe-patches/issues/3909">...</a>). The page above then ends
      * the height of the system bars below the top of the keyboard, so only that much room is left.
+     * Only with the feature flags turned on by {@link #useTranslucentNavigationBar(boolean)}.
      */
     public static int getNavigationBarBottomPadding(View navigationBar, int original) {
+        int padding = original;
         try {
-            if (original != 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (translucentNavigationBarForced && original != 0
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 WindowInsets insets = navigationBar.getRootWindowInsets();
                 if (insets != null && insets.isVisible(WindowInsets.Type.ime())) {
-                    return Math.min(original, insets.getInsets(WindowInsets.Type.systemBars()).bottom);
+                    padding = Math.min(original, insets.getInsets(WindowInsets.Type.systemBars()).bottom);
                 }
             }
+
+            padding = setSlimStatusBarRoom(navigationBar, padding);
+            padding = YouTubeGlassNavigationBar.getFloatingRoom(navigationBar, padding);
+            // The value is also stored as the room the bar adds to its height.
+            YouTubeGlassNavigationBar.setAppRoom(padding);
         } catch (Exception ex) {
             Logger.printException(() -> "getNavigationBarBottomPadding failure", ex);
         }
-        return original;
+        return padding;
+    }
+
+    /**
+     * The bar shown below the navigation bar when the connection is lost or comes back
+     * ("No connection", "Back online"), and in incognito mode.
+     */
+    static final int SLIM_STATUS_BAR = ResourceUtils.getIdentifier(
+            ResourceType.ID, "slim_status_bar");
+
+    static final int PIVOT_BAR = ResourceUtils.getIdentifier(
+            ResourceType.ID, "pivot_bar");
+
+    /**
+     * The navigation bar, with a method added during patching.
+     */
+    public interface PivotBarAccess {
+        /**
+         * Sets the room the navigation bar leaves below itself for the system navigation buttons,
+         * which is added to its height.
+         */
+        void patch_setSystemButtonsRoom(int room);
+
+        /**
+         * @return The room the navigation bar leaves below itself for the system navigation buttons,
+         *         which is added to its height.
+         */
+        int patch_getSystemButtonsRoom();
+    }
+
+    /**
+     * If the slim status bar is shown below the navigation bar.
+     */
+    private static volatile boolean slimStatusBarShown;
+
+    /**
+     * The room for the system navigation buttons the app last gave the navigation bar.
+     */
+    private static volatile int systemButtonsRoom;
+
+    /**
+     * When the navigation bar covers the system navigation buttons, the slim status bar is laid out
+     * below it, behind the buttons, which cover it. While the slim status bar is shown, the room for
+     * the buttons is left below the slim status bar instead of below the navigation bar.
+     * Only with the feature flags turned on by {@link #useTranslucentNavigationBar(boolean)}.
+     *
+     * @return The room the navigation bar leaves for the system navigation buttons.
+     */
+    private static int setSlimStatusBarRoom(View navigationBar, int room) {
+        if (!translucentNavigationBarForced || !(navigationBar instanceof PivotBarAccess)) {
+            return room;
+        }
+
+        systemButtonsRoom = room;
+        View slimStatusBar = navigationBar.getParent() instanceof ViewGroup container
+                ? container.findViewById(SLIM_STATUS_BAR)
+                : null;
+        final boolean moveRoom = slimStatusBarShown && slimStatusBar != null && room > 0;
+        if (slimStatusBar != null) {
+            // The top padding is the padding of the slim status bar itself.
+            final int bottomPadding = slimStatusBar.getPaddingTop() + (moveRoom ? room : 0);
+            if (slimStatusBar.getPaddingBottom() != bottomPadding) {
+                slimStatusBar.setPadding(slimStatusBar.getPaddingLeft(), slimStatusBar.getPaddingTop(),
+                        slimStatusBar.getPaddingRight(), bottomPadding);
+            }
+        }
+        return moveRoom ? 0 : room;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The window insets are not sent again when the slim status bar is shown or hidden,
+     * so the room for the system navigation buttons is moved whenever that happens.
+     *
+     * @param bottomBarContainer The container of the navigation bar and the slim status bar.
+     */
+    public static void watchSlimStatusBar(View bottomBarContainer) {
+        if (SLIM_STATUS_BAR == 0 || PIVOT_BAR == 0) return;
+
+        try {
+            bottomBarContainer.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                                          oldLeft, oldTop, oldRight, oldBottom) -> {
+                try {
+                    View slimStatusBar = view.findViewById(SLIM_STATUS_BAR);
+                    final boolean shown = slimStatusBar != null && slimStatusBar.getVisibility() == View.VISIBLE;
+
+                    // The capsule of the glass navigation bar follows the slim status bar, see GlassDrawable.draw(),
+                    // which moves without changing the navigation bar.
+                    View navigationBar = view.findViewById(PIVOT_BAR);
+                    if (YouTubeGlassNavigationBar.isEnabled() && navigationBar != null) {
+                        navigationBar.invalidate();
+                    }
+
+                    if (shown == slimStatusBarShown) return;
+                    slimStatusBarShown = shown;
+
+                    if (translucentNavigationBarForced && navigationBar instanceof PivotBarAccess access) {
+                        final int room = systemButtonsRoom;
+                        view.post(() -> {
+                            final int slimStatusBarRoom = setSlimStatusBarRoom(navigationBar, room);
+                            // Without room for the system navigation buttons, such as with the gesture handle
+                            // hidden, no room is moved. The room the app gives the bar is then kept as it is,
+                            // or the floating room of the glass navigation bar would be taken as room the app
+                            // added to the height, and the bar would lose it for as long as the app runs
+                            // (https://github.com/MorpheApp/morphe-patches/issues/4907).
+                            if (room <= 0) return;
+
+                            final int navigationBarRoom = YouTubeGlassNavigationBar.getFloatingRoom(
+                                    navigationBar, slimStatusBarRoom);
+                            access.patch_setSystemButtonsRoom(navigationBarRoom);
+                            YouTubeGlassNavigationBar.setAppRoom(navigationBarRoom);
+                            navigationBar.setPadding(navigationBar.getPaddingLeft(), navigationBar.getPaddingTop(),
+                                    navigationBar.getPaddingRight(), navigationBarRoom);
+                        });
+                    }
+                } catch (Exception ex) {
+                    Logger.printException(() -> "watchSlimStatusBar layout failure", ex);
+                }
+            });
+        } catch (Exception ex) {
+            Logger.printException(() -> "watchSlimStatusBar failure", ex);
+        }
     }
 
     /**
@@ -275,7 +1138,7 @@ public final class NavigationBarPatch {
      * navigation buttons, the navigation bar makes room for them, and the pages end above
      * the navigation bar. With the navigation bar hidden in the Shorts player, nothing makes that
      * room, so the Shorts player is drawn behind the system navigation buttons
-     * (https://github.com/MorpheApp/morphe-patches/issues/3908). The Shorts player then makes
+     * (<a href="https://github.com/MorpheApp/morphe-patches/issues/3908">...</a>). The Shorts player then makes
      * the room itself.
      * <p>
      * The room the Shorts player reserves for the navigation bar depends on how it's opened,
@@ -313,6 +1176,14 @@ public final class NavigationBarPatch {
                         view.post(() -> view.setPadding(view.getPaddingLeft(), view.getPaddingTop(),
                                 view.getPaddingRight(), padding));
                     }
+
+                    // The room is drawn with the background of the layout, which follows the app theme.
+                    // The system navigation buttons over the Shorts player are light in both themes,
+                    // so with the light theme they cannot be seen. The room is black like the Shorts player.
+                    if (!(view.getBackground() instanceof ColorDrawable background)
+                            || background.getColor() != Color.BLACK) {
+                        view.setBackgroundColor(Color.BLACK);
+                    }
                 } catch (Exception ex) {
                     Logger.printException(() -> "setShortsPlayerBottomInset layout failure", ex);
                 }
@@ -338,7 +1209,7 @@ public final class NavigationBarPatch {
      *                           behind the system navigation buttons or gesture handle.
      */
     public static void setNavigationBarOpaque(View bottomBarContainer) {
-        if (!DISABLE_TRANSLUCENT_NAVIGATION) return;
+        if (NAVIGATION_BAR_STYLE != NavigationBarStyle.OPAQUE) return;
 
         try {
             OpaqueSystemBars.apply(bottomBarContainer);
@@ -349,11 +1220,64 @@ public final class NavigationBarPatch {
 
     /**
      * Injection point.
+     * <p>
+     * Called whenever the navigation bar is measured.
+     */
+    public static int getNavigationBarHeightMeasureSpec(View navigationBar, int heightMeasureSpec) {
+        return YouTubeGlassNavigationBar.getHeightMeasureSpec(navigationBar, heightMeasureSpec);
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Called whenever the vertical translation of the navigation bar is set.
+     */
+    public static float getNavigationBarTranslationY(View navigationBar, float translationY) {
+        return YouTubeGlassNavigationBar.getTranslationY(navigationBar, translationY);
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Called whenever the padding of the navigation bar is set.
+     *
+     * @param bottom The bottom padding, the room below the buttons.
+     */
+    public static int getNavigationBarPadding(View navigationBar, int bottom) {
+        return YouTubeGlassNavigationBar.getFloatingRoom(navigationBar, bottom);
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Called when the app makes the tint paint drawn over the blurred background of the navigation bar.
+     */
+    public static void setNavigationBarBlurTint(Paint tint) {
+        YouTubeGlassNavigationBar.lightenBlurTint(tint);
+    }
+
+    /**
+     * Injection point.
+     *
+     * @param bottomBarContainer The container of the navigation bar.
+     */
+    public static void setNavigationBarGlass(View bottomBarContainer) {
+        if (!YouTubeGlassNavigationBar.isEnabled()) return;
+
+        try {
+            YouTubeGlassNavigationBar.apply(bottomBarContainer);
+        } catch (Exception ex) {
+            Logger.printException(() -> "setNavigationBarGlass failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
      *
      * @param original The color the app theme gives the system navigation buttons.
      */
     public static int getSystemNavigationBarColor(int original) {
-        if (!DISABLE_TRANSLUCENT_NAVIGATION) return original;
+        if (NAVIGATION_BAR_STYLE != NavigationBarStyle.OPAQUE) return original;
 
         try {
             return OpaqueSystemBars.systemNavigationBarColor(original);
@@ -365,18 +1289,213 @@ public final class NavigationBarPatch {
 
     // Navigation search and settings button
     private static final boolean SHOW_SEARCH_BUTTON = Settings.SHOW_SEARCH_BUTTON.get();
-    private static final IntegerSetting SHOW_SEARCH_BUTTON_INDEX = Settings.SHOW_SEARCH_BUTTON_INDEX;
 
     private static volatile WeakReference<TextView> searchQueryRef = new WeakReference<>(null);
 
+    public static final String SEARCH_PIVOT_IDENTIFIER = "morphe_search";
     private static Object pivotBarRenderer = null;
     private static View.OnClickListener openSearchBar = null;
 
     private static final boolean SHOW_SETTINGS_BUTTON = Settings.SHOW_SETTINGS_BUTTON.get();
-    private static final IntegerSetting SHOW_SETTINGS_BUTTON_INDEX = Settings.SHOW_SETTINGS_BUTTON_INDEX;
     private static final boolean SHOW_SETTINGS_BUTTON_TYPE = Settings.SHOW_SETTINGS_BUTTON_TYPE.get();
 
+    public static final String SETTINGS_PIVOT_IDENTIFIER = "morphe_settings";
     private static Object pivotBarSettingsRenderer = null;
+
+    private static volatile WeakReference<View> settingsTabRef = new WeakReference<>(null);
+
+    // 'You' button account switcher
+    private static final boolean YOU_BUTTON_ACCOUNT_SWITCHER = Settings.YOU_BUTTON_ACCOUNT_SWITCHER.get();
+
+    /**
+     * The server rejects the request of versions before 21.35 for the content of the lite account
+     * switcher, and the switcher closes right after it opens. These versions open the account dialog
+     * of the 'Accounts' button of the 'You' page instead.
+     */
+    private static final boolean USE_LITE_ACCOUNT_SWITCHER = VersionCheckPatch.IS_21_35_OR_GREATER;
+
+    private static final String SENDER_VIEW_KEY = "com.google.android.libraries.youtube.rendering.elements.sender_view";
+
+    private static volatile WeakReference<View> youTabRef = new WeakReference<>(null);
+
+    /**
+     * The button with a long press that a touch of the navigation bar started on,
+     * if the touch has not ended. Always accessed from the main thread.
+     */
+    private static WeakReference<View> touchedTabRef = new WeakReference<>(null);
+
+    /**
+     * If the touch of the button is a long press, so the tap it ends with does not click.
+     * Always accessed from the main thread.
+     */
+    private static boolean tabLongPressed;
+
+    private static float tabTouchX;
+    private static float tabTouchY;
+
+    @Nullable
+    private static Handler tabLongPressHandler;
+
+    private static final Runnable tabLongPress = () -> {
+        View tab = touchedTabRef.get();
+        // The long press of the navigation bar can already be called, if its feature flag is on.
+        if (tab != null && !tabLongPressed && tab.isShown()) {
+            tab.performLongClick();
+        }
+    };
+
+    /**
+     * The long press of the navigation bar and of the button itself can both be called for the
+     * same touch.
+     *
+     * @return If the long press is the first one of the touch.
+     */
+    private static boolean isNewTabLongPress() {
+        if (touchedTabRef.get() == null) {
+            // Not from a touch, such as from accessibility services.
+            return true;
+        }
+        if (tabLongPressed) return false;
+        tabLongPressed = true;
+        return true;
+    }
+
+    /**
+     * Must be called from the main thread.
+     */
+    private static void setTabLongPressAction(View tab, View.OnClickListener action) {
+        tab.setOnLongClickListener(v -> {
+            if (isNewTabLongPress()) {
+                action.onClick(v);
+            }
+            return true;
+        });
+    }
+
+    /**
+     * Runs the command of the account button of the 'You' tab. When signed in it opens the
+     * account switcher, and when incognito it opens the incognito sheet.
+     */
+    private static void openAccountSwitcher(View view) {
+        try {
+            SignInEndpoint.Builder signInEndpoint = SignInEndpoint.newBuilder();
+            if (USE_LITE_ACCOUNT_SWITCHER) {
+                signInEndpoint.setUseAccountSwitcher(true);
+            }
+            byte[] command = NavigationEndpoint.newBuilder()
+                    .setSignInEndpoint(signInEndpoint)
+                    .build()
+                    .toByteArray();
+            Map<String, Object> context = new HashMap<>();
+            // The app runs the command of the account button with the button as its sender.
+            context.put(SENDER_VIEW_KEY, view);
+            if (!CommandRouterPatch.executeCommand(command, context)) {
+                Logger.printDebug(() -> "Could not open the account switcher, no activity is shown");
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "openAccountSwitcher failure", ex);
+        }
+    }
+
+    @Nullable
+    private static View getLongPressTab(MotionEvent event) {
+        if (SHOW_SETTINGS_BUTTON) {
+            View tab = settingsTabRef.get();
+            if (tab != null && isTouchInView(event, tab)) return tab;
+        }
+        if (YOU_BUTTON_ACCOUNT_SWITCHER) {
+            View tab = youTabRef.get();
+            if (tab != null && isTouchInView(event, tab)) return tab;
+        }
+        return null;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The navigation bar handles the touches of its buttons itself, with a gesture detector, so the buttons
+     * do not get the touches and their own long press is never called. The gesture detector has long presses
+     * turned off with a feature flag, and then a long press ends as a tap. The long press of the buttons
+     * is found here instead, and the touch that ends it is changed to a cancel, so the button is not tapped.
+     *
+     * @return The touch the navigation bar handles.
+     */
+    public static MotionEvent navigationBarTouched(MotionEvent event) {
+        if (!SHOW_SETTINGS_BUTTON && !YOU_BUTTON_ACCOUNT_SWITCHER) return event;
+
+        try {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN -> {
+                    cancelTabLongPress();
+                    tabLongPressed = false;
+                    View tab = getLongPressTab(event);
+                    touchedTabRef = new WeakReference<>(tab);
+                    if (tab != null) {
+                        tabTouchX = event.getRawX();
+                        tabTouchY = event.getRawY();
+                        if (tabLongPressHandler == null) {
+                            tabLongPressHandler = new Handler(Looper.getMainLooper());
+                        }
+                        tabLongPressHandler.postDelayed(tabLongPress, ViewConfiguration.getLongPressTimeout());
+                    }
+                }
+                case MotionEvent.ACTION_MOVE -> {
+                    View tab = touchedTabRef.get();
+                    if (tab != null) {
+                        final int touchSlop = ViewConfiguration.get(tab.getContext()).getScaledTouchSlop();
+                        if (Math.abs(event.getRawX() - tabTouchX) > touchSlop
+                                || Math.abs(event.getRawY() - tabTouchY) > touchSlop) {
+                            cancelTabLongPress();
+                        }
+                    }
+                }
+                case MotionEvent.ACTION_POINTER_DOWN -> cancelTabLongPress();
+                case MotionEvent.ACTION_UP -> {
+                    cancelTabLongPress();
+                    touchedTabRef = new WeakReference<>(null);
+                    if (tabLongPressed) {
+                        tabLongPressed = false;
+                        // The original touch is still used by the views that dispatch it.
+                        MotionEvent cancel = MotionEvent.obtain(event);
+                        cancel.setAction(MotionEvent.ACTION_CANCEL);
+                        return cancel;
+                    }
+                }
+                case MotionEvent.ACTION_CANCEL -> {
+                    cancelTabLongPress();
+                    touchedTabRef = new WeakReference<>(null);
+                    tabLongPressed = false;
+                }
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "navigationBarTouched failure", ex);
+        }
+
+        return event;
+    }
+
+    private static void cancelTabLongPress() {
+        if (tabLongPressHandler != null) {
+            tabLongPressHandler.removeCallbacks(tabLongPress);
+        }
+    }
+
+    private static boolean isTouchInView(MotionEvent event, View view) {
+        if (!view.isShown()) return false;
+        int[] location = new int[2];
+        view.getLocationOnScreen(location);
+        final float x = event.getRawX();
+        final float y = event.getRawY();
+        return x >= location[0] && x < location[0] + view.getWidth()
+                && y >= location[1] && y < location[1] + view.getHeight();
+    }
+
+    private static final boolean SHOW_WATCH_LATER_BUTTON = Settings.SHOW_WATCH_LATER_BUTTON.get();
+    public static final String WATCH_LATER_PIVOT_IDENTIFIER = "morphe_watch_later";
+    private static final String WATCH_LATER_BROWSE_ID = "VLWL";
+
+    @Nullable
+    private static Object pivotBarWatchLaterRenderer = null;
 
     private static final View.OnClickListener openSearchBarOnClickListener = v -> {
         if (NavigationBar.isSearchBarActive() && searchQueryRef.get() != null) {
@@ -431,116 +1550,281 @@ public final class NavigationBarPatch {
     }
 
     /**
-     * Injection point.
-     *
-     * @param messageLite MessageLite class of PivotBarItemRenderer.
+     * Order of the navigation buttons, as their pivot identifiers. Empty to keep the order of the server.
      */
-    @Nullable
-    public static byte[] parsePivotBarItemRenderer(MessageLite messageLite) {
-        if (SHOW_SEARCH_BUTTON) {
-            try {
-                var pivotBarItemBuilder = PivotBarItemRenderer.parseFrom(messageLite.toByteArray()).toBuilder();
-                var iconName = pivotBarItemBuilder.getIcon().getYtIconType().name();
+    private static final List<String> NAVIGATION_BUTTONS_ORDER = Settings.NAVIGATION_BUTTONS_ORDER.get().isEmpty()
+            ? Collections.emptyList()
+            : Arrays.asList(Settings.NAVIGATION_BUTTONS_ORDER.get().split(","));
 
-                // Check the icon name to see if it is the PivotBarItemRenderer of the home button.
-                // If other buttons besides the home button are used, the code becomes more complex.
-                if (NavigationBar.NavigationButton.HOME.ytEnumNames.contains(iconName)) {
-                    // Change the label and icon of the navigation button.
-                    var newAccessibilityData = AccessibilityData.newBuilder().setLabel(str("menu_search")).build();
-                    var newAccessibility = Accessibility.newBuilder().setAccessibilityData(newAccessibilityData).build();
-                    var ytIconType = Utils.appIsUsingBoldIcons() ? YTIconType.SEARCH_BOLD : YTIconType.SEARCH_CAIRO;
-                    var newIcon = Icon.newBuilder().setYtIconType(ytIconType).build();
+    /**
+     * Navigation buttons seen in the navigation bar, as id and label, in the order they were seen.
+     * Synchronized on itself.
+     */
+    public static final Map<String, String> discoveredNavigationButtons =
+            loadDiscoveredButtons(Settings.NAVIGATION_BUTTONS_DISCOVERED);
 
-                    pivotBarItemBuilder.clearAccessibility();
-                    pivotBarItemBuilder.setAccessibility(newAccessibility);
-                    pivotBarItemBuilder.clearIcon();
-                    pivotBarItemBuilder.setIcon(newIcon);
+    /**
+     * Ids of the navigation buttons of the last navigation bar, in their order.
+     */
+    public static volatile List<String> navigationButtons = Collections.emptyList();
 
-                    return pivotBarItemBuilder.build().toByteArray();
-                }
-            } catch (Exception ex) {
-                Logger.printException(() -> "Failed to parse PivotBarItemRenderer", ex);
+    private static Map<String, String> loadDiscoveredButtons(StringSetting setting) {
+        Map<String, String> buttons = new LinkedHashMap<>();
+        if (setting.get().isEmpty()) return buttons;
+
+        try {
+            JSONArray array = new JSONArray(setting.get());
+            for (int i = 0, length = array.length(); i < length; i++) {
+                JSONObject button = array.getJSONObject(i);
+                buttons.put(button.getString("id"), button.getString("label"));
             }
+        } catch (Exception ex) {
+            Logger.printException(() -> "loadDiscoveredButtons failure", ex);
         }
-
-        return null;
+        return buttons;
     }
 
     /**
-     * Injection point.
-     * Called after {@link #parsePivotBarItemRenderer(MessageLite)}.
-     *
-     * @param object Classes used in YouTube with MessageLite.
+     * Saves a button that is seen for the first time, or whose label changed,
+     * so the order setting can show it.
+     * The caller holds the lock of {@code buttons}, which the settings also lock to read it.
      */
-    public static void setPivotBarRenderer(Object object) {
-        if (SHOW_SEARCH_BUTTON) {
-            pivotBarRenderer = object;
+    private static void discoverButton(StringSetting setting, Map<String, String> buttons,
+                                       String id, @Nullable String label) {
+        if (label == null || label.isEmpty()) label = id;
+        if (label.equals(buttons.get(id))) return;
+        buttons.put(id, label);
+
+        try {
+            JSONArray array = new JSONArray();
+            for (Map.Entry<String, String> button : buttons.entrySet()) {
+                array.put(new JSONObject().put("id", button.getKey()).put("label", button.getValue()));
+            }
+            setting.save(array.toString());
+        } catch (Exception ex) {
+            Logger.printException(() -> "discoverButton failure", ex);
         }
     }
 
     /**
      * Injection point.
-     * Called after {@link #setPivotBarRenderer(Object)}.
+     * Called after {@link #createPivotBarItems(MessageLite)}.
      *
      * @param list Proto list containing PivotBarRenderer.
      */
     public static List<Object> getPivotBarRendererList(List<Object> list) {
         if (list == null || list.isEmpty()) return list;
 
-        boolean addSearch = SHOW_SEARCH_BUTTON && pivotBarRenderer != null;
-        boolean addSettings = SHOW_SETTINGS_BUTTON && pivotBarSettingsRenderer != null;
-
-        if (!addSearch && !addSettings) return list;
-
         List<Object> newList = new ArrayList<>(list);
 
-        if (addSearch) {
-            int preferredIndex = SHOW_SEARCH_BUTTON_INDEX.get();
-            preferredIndex = Math.max(0, Math.min(preferredIndex, newList.size()));
-
-            newList.add(preferredIndex, pivotBarRenderer);
+        // The buttons added by Morphe are before You, unless a navigation buttons order is set.
+        int index = ClassicSubscriptionsLayoutPatch.indexOfLibraryButton(newList);
+        if (SHOW_WATCH_LATER_BUTTON && pivotBarWatchLaterRenderer != null) {
+            newList.add(index++, pivotBarWatchLaterRenderer);
+        }
+        if (SHOW_SEARCH_BUTTON && pivotBarRenderer != null) {
+            newList.add(index++, pivotBarRenderer);
+        }
+        if (SHOW_SETTINGS_BUTTON && pivotBarSettingsRenderer != null) {
+            newList.add(index, pivotBarSettingsRenderer);
         }
 
-        if (addSettings) {
-            int preferredIndex = SHOW_SETTINGS_BUTTON_INDEX.get();
-            preferredIndex = Math.max(0, Math.min(preferredIndex, newList.size()));
+        String[] ids = new String[newList.size()];
+        for (int i = 0; i < ids.length; i++) {
+            var info = ClassicSubscriptionsLayoutPatch.getPivotBarItemInfo(newList.get(i));
+            if (info == null || info.id().isEmpty()) continue;
 
-            newList.add(preferredIndex, pivotBarSettingsRenderer);
+            ids[i] = info.id();
+            synchronized (discoveredNavigationButtons) {
+                discoverButton(Settings.NAVIGATION_BUTTONS_DISCOVERED, discoveredNavigationButtons, info.id(), info.label());
+            }
         }
+
+        // The buttons in the order setting are sorted in the positions they take in the list.
+        // Other buttons, such as the buttons of other patches, stay in their position.
+        List<Integer> positions = new ArrayList<>(ids.length);
+        for (int i = 0; i < ids.length; i++) {
+            if (ids[i] != null && NAVIGATION_BUTTONS_ORDER.contains(ids[i])) {
+                positions.add(i);
+            }
+        }
+        if (!positions.isEmpty()) {
+            List<Integer> sortedPositions = new ArrayList<>(positions);
+            sortedPositions.sort(Comparator.comparingInt(i -> NAVIGATION_BUTTONS_ORDER.indexOf(ids[i])));
+
+            List<Object> items = new ArrayList<>(newList);
+            String[] originalIds = ids.clone();
+            for (int i = 0, count = positions.size(); i < count; i++) {
+                newList.set(positions.get(i), items.get(sortedPositions.get(i)));
+                ids[positions.get(i)] = originalIds[sortedPositions.get(i)];
+            }
+        }
+
+        List<String> buttons = new ArrayList<>(ids.length);
+        for (String id : ids) {
+            if (id != null) buttons.add(id);
+        }
+        navigationButtons = buttons;
 
         return newList;
     }
 
-    @Nullable
-    public static byte[] parseSettingsPivotBarItemRenderer(MessageLite messageLite) {
-        if (SHOW_SETTINGS_BUTTON) {
-            try {
-                var pivotBarItemBuilder = PivotBarItemRenderer.parseFrom(messageLite.toByteArray()).toBuilder();
-                var iconName = pivotBarItemBuilder.getIcon().getYtIconType().name();
+    /**
+     * Injection point.
+     * Creates the Search, Settings and Watch later buttons from the home button.
+     * The buttons are created with the factory of the app, so the app reads their own pivot identifier.
+     *
+     * @param messageLite MessageLite class of PivotBarItemRenderer.
+     */
+    public static void createPivotBarItems(MessageLite messageLite) {
+        if (!SHOW_SEARCH_BUTTON && !SHOW_SETTINGS_BUTTON && !SHOW_WATCH_LATER_BUTTON) return;
 
-                if (NavigationBar.NavigationButton.HOME.ytEnumNames.contains(iconName)) {
-                    var newAccessibilityData = AccessibilityData.newBuilder().setLabel(str("menu_settings")).build();
-                    var newAccessibility = Accessibility.newBuilder().setAccessibilityData(newAccessibilityData).build();
+        try {
+            var renderer = PivotBarItemRenderer.parseFrom(messageLite.toByteArray());
+            var iconName = renderer.getIcon().getYtIconType().name();
+            if (!NavigationBar.NavigationButton.HOME.ytEnumNames.contains(iconName)) return;
 
-                    var newIcon = Icon.newBuilder().setYtIconType(YTIconType.SETTINGS_CAIRO).build();
-
-                    pivotBarItemBuilder.clearAccessibility();
-                    pivotBarItemBuilder.setAccessibility(newAccessibility);
-                    pivotBarItemBuilder.clearIcon();
-                    pivotBarItemBuilder.setIcon(newIcon);
-
-                    return pivotBarItemBuilder.build().toByteArray();
-                }
-            } catch (Exception ex) {
-                Logger.printException(() -> "Failed to parse Settings PivotBarItemRenderer", ex);
+            if (SHOW_SEARCH_BUTTON) {
+                var searchRenderer = renderer.toBuilder()
+                        .setPivotIdentifier(SEARCH_PIVOT_IDENTIFIER)
+                        .setAccessibility(Accessibility.newBuilder()
+                                .setAccessibilityData(AccessibilityData.newBuilder().setLabel(str("menu_search"))))
+                        .setIcon(Icon.newBuilder().setYtIconType(Utils.appIsUsingBoldIcons()
+                                ? YTIconType.SEARCH_BOLD
+                                : YTIconType.SEARCH_CAIRO))
+                        .build().toByteString();
+                pivotBarRenderer = buildPivotBarItem(PivotBarItemBytes.newBuilder()
+                        .setPivotBarItemRenderer(searchRenderer)
+                        .build().toByteArray());
             }
+
+            if (SHOW_SETTINGS_BUTTON) {
+                var settingsRenderer = renderer.toBuilder()
+                        .setPivotIdentifier(SETTINGS_PIVOT_IDENTIFIER)
+                        .setAccessibility(Accessibility.newBuilder()
+                                .setAccessibilityData(AccessibilityData.newBuilder().setLabel(str("menu_settings"))))
+                        .setIcon(Icon.newBuilder().setYtIconType(YTIconType.SETTINGS_CAIRO))
+                        .build().toByteString();
+                pivotBarSettingsRenderer = buildPivotBarItem(PivotBarItemBytes.newBuilder()
+                        .setPivotBarItemRenderer(settingsRenderer)
+                        .build().toByteArray());
+            }
+
+            if (SHOW_WATCH_LATER_BUTTON) {
+                String label = str("morphe_watch_later_navigation_label");
+                byte[] watchLaterRenderer = renderer.toBuilder()
+                        .setPivotIdentifier(WATCH_LATER_PIVOT_IDENTIFIER)
+                        .setNavigationEndpoint(NavigationEndpoint.newBuilder()
+                                .setBrowseEndpoint(BrowseEndpoint.newBuilder().setBrowseId(WATCH_LATER_BROWSE_ID)))
+                        .setAccessibility(Accessibility.newBuilder()
+                                .setAccessibilityData(AccessibilityData.newBuilder().setLabel(label)))
+                        .setTitle(Title.newBuilder().setRuns(Runs.newBuilder().setText(label)))
+                        // The Cairo icon has no drawable in some app versions.
+                        .setIcon(Icon.newBuilder().setYtIconType(YTIconType.WATCH_LATER))
+                        .clearTargetId()
+                        .build().toByteArray();
+
+                // The tracking params and thumbnail belong to the home button.
+                var watchLaterRendererBytes = PivotBarItemRendererBytes.parseFrom(watchLaterRenderer).toBuilder()
+                        .clearTrackingParams()
+                        .clearThumbnail()
+                        .setNavigationType(NavigationType.PIVOT_BAR_NAVIGATION_TYPE_SELECT_TAB_VALUE)
+                        .build().toByteString();
+
+                pivotBarWatchLaterRenderer = buildPivotBarItem(PivotBarItemBytes.newBuilder()
+                        .setPivotBarItemRenderer(watchLaterRendererBytes)
+                        .build().toByteArray());
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "createPivotBarItems failure", ex);
         }
+    }
+
+    /**
+     * Injection point.
+     * Creates the Search, Settings and Watch later buttons from the home button of the A/B layout without labels,
+     * if its buttons are not converted to buttons with labels, so the buttons have no label either.
+     *
+     * @param messageLite MessageLite class of PivotBarIconOnlyItemRenderer.
+     */
+    public static void createIconOnlyPivotBarItems(MessageLite messageLite) {
+        if (!SHOW_SEARCH_BUTTON && !SHOW_SETTINGS_BUTTON && !SHOW_WATCH_LATER_BUTTON) return;
+
+        try {
+            var renderer = PivotBarIconOnlyItemRendererBytes.parseFrom(messageLite.toByteArray());
+            var iconName = Icon.parseFrom(renderer.getIcon()).getYtIconType().name();
+            if (!NavigationBar.NavigationButton.HOME.ytEnumNames.contains(iconName)) return;
+
+            if (SHOW_SEARCH_BUTTON) {
+                pivotBarRenderer = buildPivotBarItem(PivotBarItemBytes.newBuilder()
+                        .setPivotBarIconOnlyItemRenderer(renderer.toBuilder()
+                                .setPivotIdentifier(SEARCH_PIVOT_IDENTIFIER)
+                                .setAccessibility(Title.newBuilder()
+                                        .setRuns(Runs.newBuilder().setText(str("menu_search"))))
+                                .setIcon(Icon.newBuilder().setYtIconType(Utils.appIsUsingBoldIcons()
+                                        ? YTIconType.SEARCH_BOLD
+                                        : YTIconType.SEARCH_CAIRO).build().toByteString())
+                                .build().toByteString())
+                        .build().toByteArray());
+            }
+
+            if (SHOW_SETTINGS_BUTTON) {
+                pivotBarSettingsRenderer = buildPivotBarItem(PivotBarItemBytes.newBuilder()
+                        .setPivotBarIconOnlyItemRenderer(renderer.toBuilder()
+                                .setPivotIdentifier(SETTINGS_PIVOT_IDENTIFIER)
+                                .setAccessibility(Title.newBuilder()
+                                        .setRuns(Runs.newBuilder().setText(str("menu_settings"))))
+                                .setIcon(Icon.newBuilder().setYtIconType(YTIconType.SETTINGS_CAIRO)
+                                        .build().toByteString())
+                                .build().toByteString())
+                        .build().toByteArray());
+            }
+
+            if (SHOW_WATCH_LATER_BUTTON) {
+                // The tracking params and thumbnail belong to the home button.
+                pivotBarWatchLaterRenderer = buildPivotBarItem(PivotBarItemBytes.newBuilder()
+                        .setPivotBarIconOnlyItemRenderer(renderer.toBuilder()
+                                .setPivotIdentifier(WATCH_LATER_PIVOT_IDENTIFIER)
+                                .setNavigationEndpoint(NavigationEndpoint.newBuilder()
+                                        .setBrowseEndpoint(BrowseEndpoint.newBuilder().setBrowseId(WATCH_LATER_BROWSE_ID))
+                                        .build().toByteString())
+                                .setAccessibility(Title.newBuilder()
+                                        .setRuns(Runs.newBuilder().setText(str("morphe_watch_later_navigation_label"))))
+                                // The Cairo icon has no drawable in some app versions.
+                                .setIcon(Icon.newBuilder().setYtIconType(YTIconType.WATCH_LATER)
+                                        .build().toByteString())
+                                .clearTargetId()
+                                .clearTrackingParams()
+                                .clearThumbnail()
+                                .setNavigationType(NavigationType.PIVOT_BAR_NAVIGATION_TYPE_SELECT_TAB_VALUE)
+                                .build().toByteString())
+                        .build().toByteArray());
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "createIconOnlyPivotBarItems failure", ex);
+        }
+    }
+
+    /**
+     * Method is modified during patching to create the navigation bar item with the factory of the app.
+     *
+     * @param pivotBarItem Navigation bar item proto.
+     */
+    @Nullable
+    @SuppressWarnings("SameReturnValue")
+    private static Object buildPivotBarItem(byte[] pivotBarItem) {
         return null;
     }
 
-    public static void setPivotBarSettingsRenderer(Object object) {
-        if (SHOW_SETTINGS_BUTTON) {
-            pivotBarSettingsRenderer = object;
+    /**
+     * Injection point.
+     * The app has no selected icon for the Watch later icon, so the outline icon is shown
+     * when the Watch later button is selected.
+     */
+    public static <E extends Enum<E>> void setWatchLaterSelectedIcon(EnumMap<E, Integer> icons, E watchLaterIcon) {
+        if (SHOW_WATCH_LATER_BUTTON) {
+            icons.put(watchLaterIcon, ResourceUtils.getIdentifier(
+                    ResourceType.DRAWABLE, "morphe_watch_later_selected"));
         }
     }
 
@@ -557,11 +1841,29 @@ public final class NavigationBarPatch {
             "TAB_ACTIVITY" // Old layout.
     };
 
-    private static final String SETTING_BUTTON_ENUM_NAME = "SETTINGS_CAIRO";
+    /**
+     * Icon of the Settings button of Morphe, which is also its id in the toolbar buttons order.
+     */
+    public static final String SETTING_BUTTON_ENUM_NAME = "SETTINGS_CAIRO";
+
+    /**
+     * The toolbar of some pages, such as the 'You' tab, comes from their own response, which still has
+     * the notifications button, so it is replaced with the create button of the toolbar of another page.
+     */
+    @Nullable
+    private static volatile MessageLite toolbarCreateButton;
+
+    /**
+     * The swap has effect only if the server added the notifications tab to the navigation bar.
+     * Otherwise, the toolbar button is the only way to open the notifications.
+     */
+    private static volatile boolean notificationsTabCreated;
 
     private static final boolean HIDE_TOOLBAR_CAST_BUTTON = Settings.HIDE_TOOLBAR_CAST_BUTTON.get();
 
     private static final boolean HIDE_TOOLBAR_CHAT_BUTTON = Settings.HIDE_TOOLBAR_CHAT_BUTTON.get();
+
+    private static final boolean HIDE_TOOLBAR_COMPANION_BUTTON = Settings.HIDE_TOOLBAR_COMPANION_BUTTON.get();
 
     private static final boolean HIDE_TOOLBAR_CREATE_BUTTON = Settings.HIDE_TOOLBAR_CREATE_BUTTON.get();
 
@@ -572,7 +1874,25 @@ public final class NavigationBarPatch {
     private static final boolean HIDE_TOOLBAR_MICROPHONE_BUTTON = Settings.HIDE_TOOLBAR_MICROPHONE_BUTTON.get();
 
     private static final boolean SHOW_TOOLBAR_SETTINGS_BUTTON = Settings.SHOW_TOOLBAR_SETTINGS_BUTTON.get();
-    private static final IntegerSetting SHOW_TOOLBAR_SETTINGS_BUTTON_INDEX = Settings.SHOW_TOOLBAR_SETTINGS_BUTTON_INDEX;
+
+    /**
+     * Order of the toolbar buttons, as their ids. Empty to keep the order of the server.
+     */
+    private static final List<String> TOOLBAR_BUTTONS_ORDER = Settings.TOOLBAR_BUTTONS_ORDER.get().isEmpty()
+            ? Collections.emptyList()
+            : Arrays.asList(Settings.TOOLBAR_BUTTONS_ORDER.get().split(","));
+
+    /**
+     * Toolbar buttons seen in the toolbars, as id and label, in the order they were seen.
+     * Synchronized on itself.
+     */
+    public static final Map<String, String> discoveredToolbarButtons =
+            loadDiscoveredButtons(Settings.TOOLBAR_BUTTONS_DISCOVERED);
+
+    /**
+     * Ids of the buttons of the last toolbar, in their order.
+     */
+    public static volatile List<String> toolbarButtons = Collections.emptyList();
     private static final boolean SHOW_TOOLBAR_SETTINGS_BUTTON_TYPE = Settings.SHOW_TOOLBAR_SETTINGS_BUTTON_TYPE.get();
 
     /**
@@ -587,19 +1907,171 @@ public final class NavigationBarPatch {
 
     /**
      * Injection point.
+     * <p>
+     * The cast companion features hide the toolbar Cast button unless the cast icon awareness allows it,
+     * such as with a cast device nearby, or replace it with a button that opens the companion of the watch page.
+     * The Cast button is shown again, and opens the cast devices, if it is not hidden with the setting.
      */
-    public static boolean hideCastButton(boolean original) {
-        return !HIDE_TOOLBAR_CAST_BUTTON && original;
+    public static boolean useCastCompanion(boolean original) {
+        return HIDE_TOOLBAR_CAST_BUTTON && original;
+    }
+
+    private static final int TOOLBAR_CAST_BUTTON_ID = ResourceUtils.getIdentifier(ResourceType.ID, "menu_cast");
+
+    /**
+     * The Companion button has the id of the Cast button, and the toolbar keeps its buttons by their id,
+     * so the Companion button is given its own id.
+     */
+    private static final int TOOLBAR_COMPANION_BUTTON_ID = View.generateViewId();
+
+    /**
+     * The Companion button of each Cast button, as every activity has its own buttons.
+     * The Companion button is kept weakly too, as it holds the activity that holds the Cast button.
+     * Synchronized on itself.
+     */
+    private static final Map<Object, WeakReference<Object>> toolbarCompanionButtons = new WeakHashMap<>();
+
+    /**
+     * The provider of a toolbar button, with a method added during patching.
+     */
+    public interface ToolbarButtonProvider {
+        /**
+         * @return The button, which the provider creates the first time.
+         */
+        Object patch_getButton();
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The app adds either the Cast button or the Companion button, which uses the phone as a companion to the
+     * video playing on a TV, to the toolbar. The Cast button is always added, and this is called if the app
+     * chose the Companion button, which is then added next to it, see {@link #addToolbarCompanionButton(SparseArray)}.
+     *
+     * @param castButtonProvider The provider of the Cast button.
+     * @param companionButton    The Companion button the app chose.
+     * @return The Cast button, which the app adds to the toolbar instead.
+     */
+    public static Object getToolbarCastButton(ToolbarButtonProvider castButtonProvider, Object companionButton) {
+        try {
+            Object castButton = castButtonProvider.patch_getButton();
+            Logger.printDebug(() -> "Toolbar Cast button used instead of the Companion button");
+
+            if (!HIDE_TOOLBAR_COMPANION_BUTTON) {
+                synchronized (toolbarCompanionButtons) {
+                    toolbarCompanionButtons.put(castButton, new WeakReference<>(companionButton));
+                }
+            }
+            return castButton;
+        } catch (Exception ex) {
+            Logger.printException(() -> "getToolbarCastButton failure", ex);
+            // The button the app chose.
+            return companionButton;
+        }
     }
 
     /**
      * Injection point.
      */
-    public static void hideCastButton(MenuItem menuItem) {
+    public static int getToolbarCompanionButtonId() {
+        return TOOLBAR_COMPANION_BUTTON_ID;
+    }
+
+    /**
+     * Injection point.
+     * Called when the menu of a toolbar is created.
+     *
+     * @param buttons The buttons of the toolbar, by their id.
+     */
+    public static void addToolbarCompanionButton(SparseArray<Object> buttons) {
+        if (HIDE_TOOLBAR_COMPANION_BUTTON || buttons == null || TOOLBAR_CAST_BUTTON_ID == 0) return;
+
+        try {
+            Object castButton = buttons.get(TOOLBAR_CAST_BUTTON_ID);
+            if (castButton == null) return;
+
+            final WeakReference<Object> companionButtonRef;
+            synchronized (toolbarCompanionButtons) {
+                companionButtonRef = toolbarCompanionButtons.get(castButton);
+            }
+            // Only if the app chose the Companion button for this Cast button.
+            Object companionButton = companionButtonRef == null ? null : companionButtonRef.get();
+            if (companionButton != null) {
+                buttons.put(TOOLBAR_COMPANION_BUTTON_ID, companionButton);
+                Logger.printDebug(() -> "Toolbar Companion button added");
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "addToolbarCompanionButton failure", ex);
+        }
+    }
+
+    /**
+     * The views of the toolbar Cast buttons. The media route button is also used by the player,
+     * whose Cast button is left as it is. Only accessed from the main thread.
+     */
+    private static final Set<View> toolbarCastButtonViews = Collections.newSetFromMap(new WeakHashMap<>());
+
+    /**
+     * Injection point.
+     * Called whenever the app shows or hides the toolbar Cast button, which it shows if casting is available.
+     * <p>
+     * After a cold start, the app can find casting not available until it is opened again, such as by going
+     * to the settings and back, and then keeps the button shown. The button is always shown instead.
+     *
+     * @param visible If the app shows the button.
+     */
+    public static boolean hideToolbarCastButton(MenuItem menuItem, boolean visible) {
+        if (HIDE_TOOLBAR_CAST_BUTTON) return false;
+
+        if (!visible) {
+            Logger.printDebug(() -> "Toolbar Cast button shown, the app hides it as casting is not available");
+        }
+        return true;
+    }
+
+    /**
+     * Injection point.
+     * Called when the app creates the toolbar Cast button, for every toolbar menu.
+     */
+    public static void hideToolbarCastButton(MenuItem menuItem) {
         if (HIDE_TOOLBAR_CAST_BUTTON) {
             menuItem.setVisible(false);
             menuItem.setEnabled(false);
+            return;
         }
+
+        try {
+            // The view of the button is shown and hidden separately, by the controller of the cast devices.
+            View view = menuItem.getActionView();
+            if (view != null) {
+                toolbarCastButtonViews.add(view);
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "hideToolbarCastButton failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called whenever the visibility of a media route button is set.
+     */
+    public static int getToolbarCastButtonVisibility(View view, int visibility) {
+        try {
+            return visibility != View.VISIBLE && toolbarCastButtonViews.contains(view)
+                    ? View.VISIBLE
+                    : visibility;
+        } catch (Exception ex) {
+            Logger.printException(() -> "getToolbarCastButtonVisibility failure", ex);
+            return visibility;
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called whenever a media route button is enabled or disabled.
+     */
+    public static boolean getToolbarCastButtonEnabled(View view, boolean enabled) {
+        return enabled || toolbarCastButtonViews.contains(view);
     }
 
     /**
@@ -666,47 +2138,12 @@ public final class NavigationBarPatch {
     }
 
     /**
-     * Injection point.
-     * <p>
-     * The toolbar create button of the Android Automotive layout, which swaps the create button with the
-     * notifications button, opens a bottom sheet whose video button uses the upload endpoint, which the app
-     * handles only in the creation modes. The upload endpoint is opened in the creation modes instead,
-     * as the create button of the phone layout does.
-     */
-    public static void fixToolbarCreateButtonUpload(List<MessageLite> rawButtonList) {
-        if (HIDE_TOOLBAR_CREATE_BUTTON || rawButtonList == null || rawButtonList.isEmpty()) return;
-
-        try {
-            for (int i = 0, size = rawButtonList.size(); i < size; i++) {
-                MessageLite rawButtons = rawButtonList.get(i);
-                Buttons buttons = Buttons.parseFrom(rawButtons.toByteArray());
-                if (!buttons.hasButtonRenderer() || !buttons.getButtonRenderer().hasIcon()
-                        || !Utils.equalsAny(buttons.getButtonRenderer().getIcon().getYtIconType().name(),
-                        CREATE_BUTTON_ENUMS)) {
-                    continue;
-                }
-
-                ButtonRenderer createButton = openUploadInCreationModes(buttons.getButtonRenderer());
-                if (createButton == null) {
-                    return;
-                }
-                rawButtonList.set(i, parseWithRegistry(rawButtons,
-                        buttons.toBuilder().setButtonRenderer(createButton).build().toByteArray(),
-                        getGeneratedRegistry()));
-                Logger.printDebug(() -> "Toolbar create button opens the upload in the creation modes");
-                return;
-            }
-        } catch (Exception ex) {
-            Logger.printException(() -> "fixToolbarCreateButtonUpload failure", ex);
-        }
-    }
-
-    /**
      * Parses a message with the extension registry. The commands of the buttons are extensions,
      * which are lost if the message is parsed without the registry.
      *
      * @param message Message of the class to parse.
      */
+    @SuppressWarnings("SameReturnValue")
     private static MessageLite parseWithRegistry(MessageLite message, byte[] bytes, ExtensionRegistryLite registry) {
         return null; // Modified during patching.
     }
@@ -714,69 +2151,113 @@ public final class NavigationBarPatch {
     /**
      * @return The extension registry of the app.
      */
+    @SuppressWarnings("SameReturnValue")
     private static ExtensionRegistryLite getGeneratedRegistry() {
         return null; // Modified during patching.
     }
 
     /**
-     * @return The create button whose upload buttons open the upload endpoint in the creation modes,
-     *         or null if the create button has no upload button.
+     * Injection point.
+     * Called when a toolbar button is created, on any page, also on the pages whose toolbar comes
+     * from their own response, such as the channel pages and the 'You' tab.
+     * <p>
+     * The toolbar create button of the Android Automotive layout, which swaps the create button with the
+     * notifications button, opens a bottom sheet whose video button uses the upload endpoint, which the app
+     * handles only in the creation modes. The upload endpoint is opened in the creation modes instead,
+     * as the create button of the phone layout does.
+     *
+     * @param buttonRenderer The renderer of the button.
+     * @return The renderer the button is created with.
      */
-    @Nullable
-    private static ButtonRenderer openUploadInCreationModes(ButtonRenderer createButton) {
-        NavigationEndpoint endpoint = createButton.getNavigationEndpoint();
-        if (!endpoint.hasCreationEntrySheetEndpoint()) {
-            return null;
+    public static MessageLite getToolbarButtonRenderer(MessageLite buttonRenderer) {
+        if (buttonRenderer == null || (HIDE_TOOLBAR_CREATE_BUTTON && !SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON)) {
+            return buttonRenderer;
         }
-        CreationEntrySheetEndpoint sheetEndpoint = endpoint.getCreationEntrySheetEndpoint();
-        ButtonSheetRenderer sheet = sheetEndpoint.getButtonSheetSupportedRenderers().getButtonSheetRenderer();
-        ButtonSheetRenderer.Builder sheetBuilder = sheet.toBuilder();
-        boolean replaced = false;
 
-        for (int i = 0, count = sheet.getButtonsCount(); i < count; i++) {
-            Buttons button = sheet.getButtons(i);
-            ButtonRenderer buttonRenderer = button.getButtonRenderer();
-            NavigationEndpoint uploadEndpoint = buttonRenderer.getNavigationEndpoint();
-            if (!button.hasButtonRenderer() || !uploadEndpoint.hasShortsCreationEndpoint()) {
-                continue;
+        try {
+            ButtonRenderer renderer = ButtonRenderer.parseFrom(buttonRenderer.toByteArray());
+            String iconName = renderer.getIcon().getYtIconType().name();
+
+            if (Utils.equalsAny(iconName, CREATE_BUTTON_ENUMS)) {
+                NavigationEndpoint endpoint = renderer.getNavigationEndpoint();
+                if (!HIDE_TOOLBAR_CREATE_BUTTON && endpoint.hasCreationEntrySheetEndpoint()) {
+                    CreationEntrySheetEndpoint sheetEndpoint = endpoint.getCreationEntrySheetEndpoint();
+                    ButtonSheetRenderer sheet = sheetEndpoint.getButtonSheetSupportedRenderers().getButtonSheetRenderer();
+                    ButtonSheetRenderer.Builder sheetBuilder = sheet.toBuilder();
+                    boolean replaced = false;
+
+                    for (int i = 0, count = sheet.getButtonsCount(); i < count; i++) {
+                        Buttons button = sheet.getButtons(i);
+                        ButtonRenderer buttonRendererOfSheet = button.getButtonRenderer();
+                        NavigationEndpoint uploadEndpoint = buttonRendererOfSheet.getNavigationEndpoint();
+                        if (!button.hasButtonRenderer() || !uploadEndpoint.hasShortsCreationEndpoint()) {
+                            continue;
+                        }
+
+                        // The only mode button of the creation modes opens the upload endpoint.
+                        ButtonRenderer modeButton = buttonRendererOfSheet.toBuilder()
+                                .clearNavigationEndpoint()
+                                .setCommand(uploadEndpoint)
+                                .build();
+                        CreationModesSwitcherRenderer switcher = CreationModesSwitcherRenderer.newBuilder()
+                                .addModeButtons(Buttons.newBuilder().setButtonRenderer(modeButton))
+                                .addModes(CreationMode.CREATION_MODE_UPLOADS)
+                                .setDefaultMode(CreationMode.CREATION_MODE_UPLOADS)
+                                .build();
+                        CreationModesCommand creationModesCommand = CreationModesCommand.newBuilder()
+                                .setCreationModesControlsRenderer(CreationModesControlsRendererHolder.newBuilder()
+                                        .setCreationModesControlsRenderer(CreationModesControlsRenderer.newBuilder()
+                                                .setCreationModesSwitcherRenderer(CreationModesSwitcherRendererHolder.newBuilder()
+                                                        .setCreationModesSwitcherRenderer(switcher))))
+                                .build();
+
+                        NavigationEndpoint creationModesEndpoint = uploadEndpoint.toBuilder()
+                                .clearShortsCreationEndpoint()
+                                .setCreationModesCommand(creationModesCommand)
+                                .build();
+                        sheetBuilder.setButtons(i, button.toBuilder().setButtonRenderer(
+                                buttonRendererOfSheet.toBuilder().setNavigationEndpoint(creationModesEndpoint)));
+                        replaced = true;
+                    }
+
+                    // Nothing is changed if the create button has no upload button.
+                    if (replaced) {
+                        CreationEntrySheetEndpoint creationModesSheetEndpoint = sheetEndpoint.toBuilder()
+                                .setButtonSheetSupportedRenderers(sheetEndpoint.getButtonSheetSupportedRenderers().toBuilder()
+                                        .setButtonSheetRenderer(sheetBuilder))
+                                .build();
+                        buttonRenderer = parseWithRegistry(buttonRenderer, renderer.toBuilder()
+                                        .setNavigationEndpoint(endpoint.toBuilder().setCreationEntrySheetEndpoint(creationModesSheetEndpoint))
+                                        .build().toByteArray(),
+                                getGeneratedRegistry());
+                        Logger.printDebug(() -> "Toolbar create button opens the upload in the creation modes");
+                    }
+                }
+
+                if (SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON) {
+                    toolbarCreateButton = buttonRenderer;
+                }
+            } else if (SWAP_CREATE_WITH_NOTIFICATIONS_BUTTON && Utils.equalsAny(iconName, NOTIFICATION_BUTTON_ENUMS)
+                    && notificationsTabCreated && !HIDE_NAVIGATION_BAR && !Settings.HIDE_NOTIFICATIONS_BUTTON.get()) {
+                MessageLite createButton = toolbarCreateButton;
+                if (createButton != null) {
+                    return createButton;
+                }
             }
-
-            // The only mode button of the creation modes opens the upload endpoint.
-            ButtonRenderer modeButton = buttonRenderer.toBuilder()
-                    .clearNavigationEndpoint()
-                    .setCommand(uploadEndpoint)
-                    .build();
-            CreationModesSwitcherRenderer switcher = CreationModesSwitcherRenderer.newBuilder()
-                    .addModeButtons(Buttons.newBuilder().setButtonRenderer(modeButton))
-                    .addModes(CreationMode.CREATION_MODE_UPLOADS)
-                    .setDefaultMode(CreationMode.CREATION_MODE_UPLOADS)
-                    .build();
-            CreationModesCommand creationModesCommand = CreationModesCommand.newBuilder()
-                    .setCreationModesControlsRenderer(CreationModesControlsRendererHolder.newBuilder()
-                            .setCreationModesControlsRenderer(CreationModesControlsRenderer.newBuilder()
-                                    .setCreationModesSwitcherRenderer(CreationModesSwitcherRendererHolder.newBuilder()
-                                            .setCreationModesSwitcherRenderer(switcher))))
-                    .build();
-
-            NavigationEndpoint creationModesEndpoint = uploadEndpoint.toBuilder()
-                    .clearShortsCreationEndpoint()
-                    .setCreationModesCommand(creationModesCommand)
-                    .build();
-            sheetBuilder.setButtons(i, button.toBuilder().setButtonRenderer(
-                    buttonRenderer.toBuilder().setNavigationEndpoint(creationModesEndpoint)));
-            replaced = true;
+        } catch (Exception ex) {
+            Logger.printException(() -> "getToolbarButtonRenderer failure", ex);
         }
-        if (!replaced) {
-            return null;
-        }
+        return buttonRenderer;
+    }
 
-        CreationEntrySheetEndpoint creationModesSheetEndpoint = sheetEndpoint.toBuilder()
-                .setButtonSheetSupportedRenderers(sheetEndpoint.getButtonSheetSupportedRenderers().toBuilder()
-                        .setButtonSheetRenderer(sheetBuilder))
-                .build();
-        return createButton.toBuilder()
-                .setNavigationEndpoint(endpoint.toBuilder().setCreationEntrySheetEndpoint(creationModesSheetEndpoint))
-                .build();
+    /**
+     * Injection point.
+     * The create button does not show the new content count of the notifications button it replaced.
+     *
+     * @param countIds The ids of the pages whose new content count the button shows.
+     */
+    public static List<String> getToolbarButtonCountIds(MessageLite buttonRenderer, List<String> countIds) {
+        return buttonRenderer == toolbarCreateButton ? new ArrayList<>() : countIds;
     }
 
     /**
@@ -825,7 +2306,7 @@ public final class NavigationBarPatch {
 
                         // Replace the accessibility label of the copied button.
                         ButtonRendererAccessibilityData accessibilityData = ButtonRendererAccessibilityData
-                                .newBuilder().setLabel(str("morphe_settings_submenu_title")).build();
+                                .newBuilder().setLabel(str("settings")).build();
                         renderer.setButtonRendererAccessibilityData(accessibilityData);
                         renderer.setRendererAccessibilityData(RendererAccessibilityData.newBuilder()
                                 .setButtonRendererAccessibilityData(accessibilityData).build());
@@ -835,7 +2316,9 @@ public final class NavigationBarPatch {
 
                         return originalButtons.toBuilder().setButtonRenderer(renderer.build()).build().toByteArray();
                     }
-                } catch (Exception ignored) {
+                } catch (Exception ex) {
+                    // Another button of the list can still be copied.
+                    Logger.printDebug(() -> "Could not copy a toolbar button for the settings button", ex);
                 }
             }
         } catch (Exception e) {
@@ -845,17 +2328,78 @@ public final class NavigationBarPatch {
     }
 
     /**
-     * Injection point.
+     * @return ID of the toolbar button: the page it opens, or its icon.
      */
-    public static void applyToolbarSettingsButtonIndex(List<MessageLite> rawButtonList) {
-        if (!SHOW_TOOLBAR_SETTINGS_BUTTON || rawButtonList == null || rawButtonList.isEmpty()) return;
+    private static String getToolbarButtonId(ButtonRenderer buttonRenderer) {
+        String iconName = buttonRenderer.getIcon().getYtIconType().name();
+        // The Settings button of Morphe is a copy of another button, with its navigation endpoint.
+        if (SETTING_BUTTON_ENUM_NAME.equals(iconName)) return iconName;
 
-        int targetIndex = SHOW_TOOLBAR_SETTINGS_BUTTON_INDEX.get() - 1;
+        String browseId = buttonRenderer.getNavigationEndpoint().getBrowseEndpoint().getBrowseId();
+        return browseId.isEmpty() ? iconName : browseId;
+    }
 
-        targetIndex = Math.max(0, Math.min(targetIndex, rawButtonList.size() - 1));
+    /**
+     * Injection point.
+     * Called after the hidden buttons are removed and the Settings button is added.
+     */
+    public static void applyToolbarButtonsOrder(List<MessageLite> rawButtonList) {
+        if (rawButtonList == null || rawButtonList.isEmpty()) return;
 
-        MessageLite settingsButton = rawButtonList.remove(rawButtonList.size() - 1);
-        rawButtonList.add(targetIndex, settingsButton);
+        try {
+            List<String> ids = new ArrayList<>(rawButtonList.size());
+            for (MessageLite rawButton : rawButtonList) {
+                Buttons buttons = Buttons.parseFrom(rawButton.toByteArray());
+                // The chat and notifications buttons can be top bar buttons, which contain their button.
+                if (buttons.hasTopbarButtonRenderer()) {
+                    buttons = buttons.getTopbarButtonRenderer().getButtons();
+                }
+                ids.add(buttons.hasButtonRenderer() ? getToolbarButtonId(buttons.getButtonRenderer()) : null);
+            }
+
+            // Without an order, the Settings button is the third button, as it was before the order setting.
+            // With an order, the toolbar buttons are sorted by getToolbarButtonOrder().
+            final int settingsIndex = ids.indexOf(SETTING_BUTTON_ENUM_NAME);
+            if (TOOLBAR_BUTTONS_ORDER.isEmpty() && settingsIndex >= 0) {
+                final int targetIndex = Math.min(2, ids.size() - 1);
+                rawButtonList.add(targetIndex, rawButtonList.remove(settingsIndex));
+                ids.add(targetIndex, ids.remove(settingsIndex));
+            }
+
+            ids.removeIf(Objects::isNull);
+            toolbarButtons = ids;
+        } catch (Exception ex) {
+            Logger.printException(() -> "applyToolbarButtonsOrder failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
+     * The order of the menu items sets the order of the buttons of every toolbar,
+     * including the toolbars that are not created from the toolbar of the guide, such as of the 'You' tab.
+     *
+     * @param original       Order of the button, from the order the buttons were created in.
+     * @param buttonRenderer ButtonRenderer of the toolbar button.
+     */
+    public static int getToolbarButtonOrder(int original, MessageLite buttonRenderer) {
+        try {
+            ButtonRenderer renderer = ButtonRenderer.parseFrom(buttonRenderer.toByteArray());
+            String id = getToolbarButtonId(renderer);
+            synchronized (discoveredToolbarButtons) {
+                discoverButton(Settings.TOOLBAR_BUTTONS_DISCOVERED, discoveredToolbarButtons,
+                        id, renderer.getButtonRendererAccessibilityData().getLabel());
+            }
+
+            final int rank = TOOLBAR_BUTTONS_ORDER.indexOf(id);
+            if (rank >= 0) {
+                // The original order is at least 1000, so the buttons in the order setting
+                // are before the other buttons.
+                return 1000 - TOOLBAR_BUTTONS_ORDER.size() + rank;
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "getToolbarButtonOrder failure", ex);
+        }
+        return original;
     }
 
     /**
@@ -911,22 +2455,6 @@ public final class NavigationBarPatch {
     }
 
     private static void openMorpheSettings(View view) {
-        Activity activity = Utils.getActivity();
-        Context context = activity != null ? activity : view.getContext();
-
-        try {
-            Intent intent = new Intent(Intent.ACTION_MAIN);
-            intent.setData(Uri.parse(BaseActivityHook.MORPHE_SETTINGS_INTENT));
-            intent.setPackage(context.getPackageName());
-            intent.setClass(context, GoogleApiActivity.class);
-
-            if (activity == null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            }
-
-            context.startActivity(intent);
-        } catch (Exception e) {
-            Logger.printException(() -> "Failed to open Morphe settings", e);
-        }
+        YouTubeActivityHook.openSettings(view.getContext(), null);
     }
 }

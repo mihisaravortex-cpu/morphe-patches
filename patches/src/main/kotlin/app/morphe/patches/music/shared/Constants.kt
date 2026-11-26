@@ -18,19 +18,28 @@ internal object Constants {
         ),
         targets = listOf(
             AppTarget(
-                version = "9.42.52",
+                version = "9.47.51",
+                minSdk = 28,
+                isExperimental = true,
+            ),
+            AppTarget(
+                version = "9.46.51",
+                minSdk = 28,
+                isExperimental = true,
+            ),
+            AppTarget(
+                version = "9.45.51",
+                minSdk = 28,
+                isExperimental = true,
+            ),
+            AppTarget(
+                version = "9.44.52",  // Last version for Android 8.0
                 minSdk = 26,
                 isExperimental = true,
             ),
             AppTarget(
-                version = "9.41.52",
-                minSdk = 26,
-                isExperimental = true,
-            ),
-            AppTarget(
-                version = "9.40.51",
-                minSdk = 26,
-                isExperimental = true,
+                version = "9.30.53",
+                minSdk = 26
             ),
             AppTarget(
                 version = "9.20.53",

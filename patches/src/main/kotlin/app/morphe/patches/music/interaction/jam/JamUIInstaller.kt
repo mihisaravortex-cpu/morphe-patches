@@ -7,18 +7,23 @@
 
 package app.morphe.patches.music.interaction.jam
 
+import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.methodCall
-import app.morphe.patcher.patch.BytecodePatchContext
+import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patcher.util.cloneParameters
+import app.morphe.patcher.util.getMutableMethod
+import app.morphe.patcher.util.matchAllMethodIndicesForEach
+import app.morphe.patcher.util.numberOfParameterRegistersLogical
+import app.morphe.patcher.util.proxy.mutableTypes.MutableField.Companion.toMutable
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.util.findInstructionIndicesReversedOrThrow
-import app.morphe.util.getMutableMethod
 import app.morphe.util.indexOfFirstInstructionOrThrow
-import app.morphe.util.matchAllMethodIndicesForEach
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
@@ -27,6 +32,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+import com.android.tools.smali.dexlib2.immutable.ImmutableField
 
 private const val CLOCK = "Lapp/morphe/extension/music/patches/jam/JamClock;"
 private const val OBJECT = "Ljava/lang/Object;"
@@ -42,7 +48,7 @@ private const val MENU_ROW = $$"Lapp/morphe/extension/music/patches/jam/JamMenu$
 private const val ITEM_ACCESS = $$"Lapp/morphe/extension/music/patches/jam/YouTubeMusicBridge$ItemAccess;"
 
 /** Installs presentation bridges after [JamUiAbi] has resolved each native relationship. */
-internal fun BytecodePatchContext.installJamUiBridges(ui: JamUiAbi, queue: JamQueueAbi) {
+internal fun installJamUiBridges(ui: JamUiAbi, queue: JamQueueAbi) {
     installClock(ui.clock)
     installAutoplayUi(ui.autoplay)
     installPalette(ui.palette)
@@ -55,13 +61,12 @@ internal fun BytecodePatchContext.installJamUiBridges(ui: JamUiAbi, queue: JamQu
     installPlaybackIcon(ui.playbackIcon)
 }
 
-private fun BytecodePatchContext.installPlaybackIcon(icon: PlaybackIconAbi) {
+private fun installPlaybackIcon(icon: PlaybackIconAbi) {
     val owner = mutableClassDefBy(icon.render.definingClass)
     val render = icon.render.getMutableMethod()
     val name = render.name
     val modelType = icon.constructor.definingClass
     render.setName("patch_jamLocalIcon")
-    owner.interfaces.add(PLAYER_ICON)
     owner.addBridge(
         name,
         listOf(modelType),
@@ -76,22 +81,18 @@ private fun BytecodePatchContext.installPlaybackIcon(icon: PlaybackIconAbi) {
       return-void
       """,
     )
-    owner.addBridge(
+    owner.addPatchInterface(
+        PLAYER_ICON,
         "patch_jamView",
-        emptyList(),
-        "Landroid/view/View;",
-        2,
-        body = """
-          iget-object v0, p0, ${icon.view}
-          return-object v0
+        """
+            iget-object v0, p0, ${icon.view}
+            return-object v0
         """
     )
-    owner.addBridge(
+    owner.addPatchInterface(
+        PLAYER_ICON,
         "patch_jamState",
-        listOf("Z"),
-        OBJECT,
-        5,
-        body = """
+        """
             if-eqz p1, :paused
             sget-object v1, ${icon.playing}
             goto :create
@@ -104,20 +105,18 @@ private fun BytecodePatchContext.installPlaybackIcon(icon: PlaybackIconAbi) {
             return-object v0
         """
     )
-    owner.addBridge(
+    owner.addPatchInterface(
+        PLAYER_ICON,
         "patch_jamRender",
-        listOf(OBJECT),
-        "V",
-        2,
-        body = """
-          check-cast p1, $modelType
-          ${invokeKind(icon.render)} {p0, p1}, $render
-          return-void
+        """
+            check-cast p1, $modelType
+            ${invokeKind(icon.render)} {p0, p1}, $render
+            return-void
         """
     )
 }
 
-private fun BytecodePatchContext.installClock(clock: ClockAbi) {
+private fun installClock(clock: ClockAbi) {
     val mediaState = clock.mediaState.getMutableMethod()
     val stateCall =
         mediaState.indexOfFirstInstructionOrThrow(
@@ -156,13 +155,10 @@ private fun BytecodePatchContext.installClock(clock: ClockAbi) {
     )
 
     val timeBar = mutableClassDefBy(clock.timeBarType)
-    timeBar.interfaces.add(CLOCK_BAR)
-    timeBar.addBridge(
+    timeBar.addPatchInterface(
+        CLOCK_BAR,
         "patch_jamCreateModel",
-        listOf("J", "J", "I", "Z"),
-        "Ljava/lang/Object;",
-        8,
-        body = """
+        """
             new-instance v0, ${clock.concreteModelType}
             invoke-direct {v0}, ${clock.concreteModelType}-><init>()V
             iput-wide p1, v0, ${clock.position}
@@ -174,19 +170,17 @@ private fun BytecodePatchContext.installClock(clock: ClockAbi) {
             return-object v0
         """
     )
-    timeBar.addBridge(
+    timeBar.addPatchInterface(
+        CLOCK_BAR,
         "patch_jamRestore",
-        listOf("Ljava/lang/Object;"),
-        "V",
-        2,
-        body = """
+        """
             check-cast p1, ${clock.modelType}
             ${invokeKind(clock.setModel)} {p0, p1}, $setModel
             invoke-virtual {p0}, Landroid/view/View;->invalidate()V
             return-void
         """
     )
-    installNativeAccessor(timeBar, "patch_jamDragging", clock.dragging)
+    timeBar.addPatchInterface(CLOCK_BAR, "patch_jamDragging", clock.dragging)
 
     val seekOwner = mutableClassDefBy(clock.seek.definingClass)
     val seek = clock.seek.getMutableMethod()
@@ -209,9 +203,8 @@ private fun BytecodePatchContext.installClock(clock: ClockAbi) {
     )
 }
 
-private fun BytecodePatchContext.installPalette(palette: PaletteAbi) {
+private fun installPalette(palette: PaletteAbi) {
     val source = mutableClassDefBy(palette.type)
-    source.interfaces.add(PALETTE_SOURCE)
     val local = palette.entry.getMutableMethod()
     val name = local.name
     local.setName("patch_jamRestorePalette")
@@ -230,24 +223,23 @@ private fun BytecodePatchContext.installPalette(palette: PaletteAbi) {
             return-void
         """
     )
-    source.addBridge(
+    // 9.43+ palette source no longer keeps an extractor, so use the last one the app created.
+    val loadExtractor = palette.extractor?.let { "iget-object v0, p0, $it" }
+        ?: "sget-object v0, ${addExtractorInstanceField(palette.extract.definingClass)}"
+    source.addPatchInterface(
+        PALETTE_SOURCE,
         "patch_jamExtract",
-        listOf("Landroid/graphics/Bitmap;"),
-        "Ljava/lang/Object;",
-        3,
-        body = """
-            iget-object v0, p0, ${palette.extractor}
+        """
+            $loadExtractor
             ${invokeKind(palette.extract)} {v0, p1}, ${palette.extract}
             move-result-object v0
             return-object v0
         """
     )
-    source.addBridge(
+    source.addPatchInterface(
+        PALETTE_SOURCE,
         "patch_jamPublish",
-        listOf("Ljava/lang/Object;"),
-        "V",
-        3,
-        body = """
+        """
             check-cast p1, ${palette.extract.returnType}
             iget-object v0, p0, ${palette.publisher}
             ${invokeKind(palette.publish)} {v0, p1}, ${palette.publish}
@@ -257,10 +249,30 @@ private fun BytecodePatchContext.installPalette(palette: PaletteAbi) {
     )
 }
 
-private fun BytecodePatchContext.installPlayback(playback: PlaybackAbi) {
+/** Adds a static field to the extractor class that holds the last constructed instance. */
+private fun addExtractorInstanceField(extractorType: String) =
+    paletteExtractorConstructorFingerprint(extractorType).let {
+        val instanceField = ImmutableField(
+            extractorType,
+            "patch_jamInstance",
+            extractorType,
+            AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
+            null,
+            null,
+            null,
+        ).toMutable()
+
+        it.classDef.staticFields.add(instanceField)
+        it.method.addInstruction(
+            it.instructionMatches.first().index,
+            "sput-object p0, $instanceField"
+        )
+        instanceField
+    }
+
+private fun installPlayback(playback: PlaybackAbi) {
     playback.routers.forEach { router ->
         val owner = mutableClassDefBy(router.type)
-        owner.interfaces.add(ROUTER_ACCESS)
         val dispatch = router.dispatch.getMutableMethod()
         val dispatchName = dispatch.name
         dispatch.setName("patch_jamLocalDispatch")
@@ -283,36 +295,30 @@ private fun BytecodePatchContext.installPlayback(playback: PlaybackAbi) {
                 return-void
             """
         )
-        owner.addBridge(
+        owner.addPatchInterface(
+            ROUTER_ACCESS,
             "patch_jamDispatch",
-            listOf("Ljava/lang/Object;", "Ljava/lang/Object;"),
-            "V",
-            3,
-            accessFlags = AccessFlags.PUBLIC.value,
-            body = """
+            """
                 check-cast p1, ${playback.command.type}
                 check-cast p2, Ljava/util/Map;
                 ${invokeKind(router.dispatch)} {p0, p1, p2}, $dispatch
                 return-void
             """
         )
-        owner.addBridge(
+        owner.addPatchInterface(
+            ROUTER_ACCESS,
             "patch_jamWatch",
-            listOf("[B"),
-            "V",
-            4,
-            accessFlags = AccessFlags.PUBLIC.value,
-            body = playback.command.decode("p1", "v0") + """
-                invoke-static {}, Ljava/util/Collections;->emptyMap()Ljava/util/Map;
-                move-result-object v1
-                ${invokeKind(router.dispatch)} {p0, v0, v1}, $dispatch
-                return-void
-            """
+            playback.command.decode("p1", "v0") + """
+         invoke-static {}, Ljava/util/Collections;->emptyMap()Ljava/util/Map;
+         move-result-object v1
+         ${invokeKind(router.dispatch)} {p0, v0, v1}, $dispatch
+         return-void
+     """
         )
     }
 }
 
-private fun BytecodePatchContext.installCurrentItem(current: CurrentItemAbi) {
+private fun installCurrentItem(current: CurrentItemAbi) {
     val owner = mutableClassDefBy(current.type)
     val local = current.accessor.getMutableMethod()
     val name = local.name
@@ -338,17 +344,14 @@ private fun BytecodePatchContext.installCurrentItem(current: CurrentItemAbi) {
     )
 }
 
-private fun BytecodePatchContext.installNowPlaying(now: NowPlayingAbi, item: QueueItemAbi) {
+private fun installNowPlaying(now: NowPlayingAbi, item: QueueItemAbi) {
     val presenter = mutableClassDefBy(now.presenter.type)
-    presenter.interfaces.add(NOW_ACCESS)
     val entry = now.presenter.entry.getMutableMethod()
     entry.addInstructions(0, "invoke-static/range {p0 .. p0}, $PLAYBACK->observe($NOW_ACCESS)V")
-    presenter.addBridge(
+    presenter.addPatchInterface(
+        NOW_ACCESS,
         "patch_jamRefreshNow",
-        emptyList(),
-        "V",
-        2,
-        body = """
+        """
             const/4 v0, 0x0
             ${invokeKind(now.presenter.entry)} {p0, v0}, $entry
             return-void
@@ -372,7 +375,6 @@ private fun BytecodePatchContext.installNowPlaying(now: NowPlayingAbi, item: Que
     }
     now.queueBindings.forEach { binding ->
         val owner = mutableClassDefBy(binding.type)
-        owner.interfaces.add(NOW_ACCESS)
         val bindingMethod = binding.entry.getMutableMethod()
         val instructions = bindingMethod.instructions.toList()
         bindingMethod
@@ -398,12 +400,10 @@ private fun BytecodePatchContext.installNowPlaying(now: NowPlayingAbi, item: Que
             0,
             "invoke-static/range {p0 .. p0}, $PLAYBACK->observe($NOW_ACCESS)V",
         )
-        owner.addBridge(
+        owner.addPatchInterface(
+            NOW_ACCESS,
             "patch_jamRefreshNow",
-            emptyList(),
-            "V",
-            1,
-            body = """
+            """
                 ${invokeKind(binding.refresh)} {p0}, ${binding.refresh}
                 return-void
             """
@@ -411,7 +411,7 @@ private fun BytecodePatchContext.installNowPlaying(now: NowPlayingAbi, item: Que
     }
 }
 
-private fun BytecodePatchContext.installArtwork(artwork: ArtworkAbi) {
+private fun installArtwork(artwork: ArtworkAbi) {
     val owner = mutableClassDefBy(artwork.type)
     val local = artwork.update.getMutableMethod()
     val name = local.name
@@ -432,25 +432,20 @@ private fun BytecodePatchContext.installArtwork(artwork: ArtworkAbi) {
     )
 }
 
-private fun BytecodePatchContext.installQueueRow(row: QueueRowAbi, item: QueueItemAbi) {
+private fun installQueueRow(row: QueueRowAbi, item: QueueItemAbi) {
     val owner = mutableClassDefBy(row.type)
-    owner.interfaces.add(MENU_ROW)
-    owner.addBridge(
+    owner.addPatchInterface(
+        MENU_ROW,
         "patch_jamMenuItem",
-        emptyList(),
-        "Ljava/lang/Object;",
-        2,
-        body = """
+        """
             iget-object v0, p0, ${row.item}
             return-object v0
         """
     )
-    owner.addBridge(
+    owner.addPatchInterface(
+        MENU_ROW,
         "patch_jamShowMenu",
-        listOf("Landroid/view/View;", "Ljava/lang/Object;"),
-        "V",
-        7,
-        body = """
+        """
             move-object v0, p2
             check-cast v0, ${item.metadataType}
             ${invokeKind(row.menuAccessor)} {v0}, ${row.menuAccessor}
@@ -506,7 +501,7 @@ private fun BytecodePatchContext.installQueueRow(row: QueueRowAbi, item: QueueIt
     )
 }
 
-private fun BytecodePatchContext.installButton(button: ButtonAbi) {
+private fun installButton(button: ButtonAbi) {
     val owner = mutableClassDefBy(button.type)
     val local = button.click.getMutableMethod()
     val name = local.name
@@ -534,28 +529,27 @@ private fun Method.parameters(): List<String> = parameterTypes.map { it.toString
 @Suppress("unused")
 private fun MethodReference.parameters(): List<String> = parameterTypes.map { it.toString() }
 
-private fun BytecodePatchContext.installAutoplayUi(abi: AutoplayUiAbi) {
+private fun installAutoplayUi(abi: AutoplayUiAbi) {
     val extension = JAM_MIRROR
     val contract = $$"Lapp/morphe/extension/music/patches/jam/JamMirror$AutoplayUi;"
     val owner = mutableClassDefBy(abi.refresh.definingClass)
-    owner.interfaces.add(contract)
-    val refresh = abi.refresh.getMutableMethod()
+    // The method may have no free register at the visibility check.
+    val refresh = abi.refresh.getMutableMethod().cloneParameters()
+    val indexShift = refresh.numberOfParameterRegistersLogical
     val name = refresh.name
     refresh.setName("patch_jamLocalAutoplayUi")
     // Participants need the native boundary even when their local radio mode hides it.
-    // The wrapper below still sets the mirrored suggestion count and clears an empty header.
+    // Skip the local visibility checks and limit, but keep the native header code and the
+    // registers it reads. The wrapper below sets the mirrored suggestion count and clears
+    // an empty header.
     refresh.addInstructionsWithLabels(
-        0,
+        abi.visibilityCheck + indexShift,
         """
           invoke-static {}, $extension->active()Z
-          move-result v0
-          if-eqz v0, :local
-          const/4 v${abi.headerIndexRegister}, 0x0
-          goto :header
-          :local
-          nop
+          move-result p0
+          if-nez p0, :header
         """,
-        ExternalLabel("header", refresh.getInstruction(abi.headerStart)),
+        ExternalLabel("header", refresh.getInstruction(abi.setLimitIndex + indexShift + 1)),
     )
     owner.addBridge(
         name,
@@ -569,12 +563,10 @@ private fun BytecodePatchContext.installAutoplayUi(abi: AutoplayUiAbi) {
             return-void
         """
     )
-    owner.addBridge(
+    owner.addPatchInterface(
+        contract,
         "patch_jamAutoplayLimit",
-        listOf("I"),
-        "V",
-        3,
-        body = """
+        """
             iget-object v0, p0, ${abi.limiter}
             ${invokeKind(abi.setLimit)} {v0, p1}, ${abi.setLimit}
             if-nez p1, :done
@@ -584,12 +576,10 @@ private fun BytecodePatchContext.installAutoplayUi(abi: AutoplayUiAbi) {
             return-void
         """
     )
-    owner.addBridge(
+    owner.addPatchInterface(
+        contract,
         "patch_jamRefreshAutoplayUi",
-        emptyList(),
-        "V",
-        1,
-        body = """
+        """
             ${invokeKind(abi.refresh)} {p0}, ${owner.type}->$name()V
             return-void
         """

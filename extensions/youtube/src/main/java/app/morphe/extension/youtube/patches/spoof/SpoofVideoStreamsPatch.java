@@ -1,3 +1,13 @@
+/*
+ * Copyright 2026 Morphe.
+ * https://github.com/MorpheApp/morphe-patches
+ *
+ * Original hard forked code:
+ * https://github.com/ReVanced/revanced-patches/commit/724e6d61b2ecd868c1a9a37d465a688e83a74799
+ *
+ * See the included NOTICE file for GPLv3 Section 7 terms that apply to Morphe contributions.
+ */
+
 package app.morphe.extension.youtube.patches.spoof;
 
 import java.util.List;
@@ -16,7 +26,9 @@ public class SpoofVideoStreamsPatch {
         public boolean isAvailable() {
             ClientType client = Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE.get();
             return Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE.isAvailable()
-                    && (client == ClientType.ANDROID_VR_DASH || client == ClientType.ANDROID_VR_SABR || client == ClientType.VISIONOS_1_02);
+                    && (client == ClientType.ANDROID_VR_DASH || client == ClientType.ANDROID_VR_SABR
+                    || client == ClientType.ANDROID_VR_EXPERIMENTAL
+                    || client == ClientType.VISIONOS_1_02 || client == ClientType.VISIONOS_1_06);
         }
 
         @Override
@@ -31,8 +43,8 @@ public class SpoofVideoStreamsPatch {
     public static void setClientOrderToUse() {
         ClientType client = Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE.get();
 
-        // Use [Android XR, Android XR Downgraded, visonOS 1.03] client that has AV1 if user settings allow it.
-        // AVC cannot be forced with [Android XR, Android XR Downgraded, visonOS 1.03] because it uses VP9 and AV1.
+        // Use the Android XR or visionOS client that has AV1 if user settings allow it.
+        // AVC cannot be forced with these clients because they use VP9 and AV1.
         // VP9 blocks AV1, so the AV1 clients are not used.
         final VideoCodec codec = DisableVideoCodecsPatch.getVideoCodec();
         if (Settings.SPOOF_VIDEO_STREAMS_AV1.get() && codec == VideoCodec.DEFAULT) {
@@ -40,13 +52,17 @@ public class SpoofVideoStreamsPatch {
                 client = ClientType.ANDROID_XR_DASH;
             } else if (client == ClientType.ANDROID_VR_SABR) {
                 client = ClientType.ANDROID_XR_SABR;
+            } else if (client == ClientType.ANDROID_VR_EXPERIMENTAL) {
+                client = ClientType.ANDROID_XR_EXPERIMENTAL;
             } else if (client == ClientType.VISIONOS_1_02) {
                 client = ClientType.VISIONOS_1_03;
+            } else if (client == ClientType.VISIONOS_1_06) {
+                client = ClientType.VISIONOS_1_06_AV1;
             }
         }
 
         List<ClientType> availableClients = List.of(
-                ClientType.TV_SIMPLY,
+                ClientType.TV_SABR,
                 ClientType.ANDROID_CREATOR
                 // If not signed in to Android VR, there may be playback issues.
                 // Only use it if the user has selected it.

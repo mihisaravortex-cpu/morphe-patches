@@ -16,15 +16,16 @@ import java.util.List;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.ResourceUtils;
-import app.morphe.extension.youtube.innertube.BrowseResponseOuterClass.BrowseTab;
-import app.morphe.extension.youtube.innertube.BrowseResponseOuterClass.TabRenderer;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.FormattedString;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.PivotBarIconOnlyItemRendererBytes;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.PivotBarItemBytes;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.PivotBarItemRenderer;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.PivotBarItemRendererBytes;
-import app.morphe.extension.youtube.innertube.GuideResponseOuterClass.TextRun;
-import app.morphe.extension.youtube.innertube.IconOuterClass.YTIconType;
+import app.morphe.extension.shared.innertube.BrowseResponseOuterClass.BrowseTab;
+import app.morphe.extension.shared.innertube.BrowseResponseOuterClass.TabRenderer;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.FormattedString;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarIconOnlyItemRendererBytes;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarItemBytes;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarItemRenderer;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.PivotBarItemRendererBytes;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.TextRun;
+import app.morphe.extension.shared.innertube.IconOuterClass.Icon;
+import app.morphe.extension.shared.innertube.IconOuterClass.YTIconType;
 import app.morphe.extension.youtube.settings.Settings;
 
 /**
@@ -48,47 +49,88 @@ public final class ClassicSubscriptionsLayoutPatch {
          */
         @Nullable
         MessageLite patch_getPivotBarItemRenderer();
+
+        /**
+         * Method is added during patching.
+         *
+         * @return The PivotBarIconOnlyItemRenderer proto, or null if the item is a different renderer.
+         */
+        @Nullable
+        MessageLite patch_getPivotBarIconOnlyItemRenderer();
     }
 
-    private static final String HOME_BROWSE_ID = "FEwhat_to_watch";
-    private static final String SUBSCRIPTIONS_BROWSE_ID = "FEsubscriptions";
-    private static final String SHORTS_BROWSE_ID = "FEshorts";
-    private static final String LIBRARY_BROWSE_ID = "FElibrary";
+    // Pivot identifiers of the navigation buttons.
+    public static final String HOME_BROWSE_ID = "FEwhat_to_watch";
+    public static final String SHORTS_BROWSE_ID = "FEshorts";
+    public static final String CREATE_BROWSE_ID = "FEuploads";
+    public static final String SUBSCRIPTIONS_BROWSE_ID = "FEsubscriptions";
+    public static final String NOTIFICATIONS_BROWSE_ID = "FEactivity";
+    public static final String LIBRARY_BROWSE_ID = "FElibrary";
+
+    /**
+     * Pivot identifier and label of a navigation button.
+     */
+    record PivotBarItemInfo(String id, String label) {}
 
     private static final boolean DISABLE_ICON_ONLY_NAVIGATION_BUTTONS =
             Settings.DISABLE_ICON_ONLY_NAVIGATION_BUTTONS.get();
+
+    private static final boolean DISABLE_TOOLBAR_NAVIGATION_TABS =
+            Settings.DISABLE_TOOLBAR_NAVIGATION_TABS.get();
+
+    private static final boolean HIDE_FILTER_BAR_IN_FEED = Settings.HIDE_FILTER_BAR_IN_FEED.get();
 
     /**
      * Icon of the Subscriptions navigation button, with the same style of the Home button.
      */
     private static volatile YTIconType subscriptionsIconType = YTIconType.PIVOT_SUBSCRIPTIONS;
 
-    private static boolean isFeedTab(TabRenderer tabRenderer) {
-        String browseId = tabRenderer.getEndpoint().getBrowseEndpoint().getBrowseId();
-        if (browseId.isEmpty()) {
-            browseId = tabRenderer.getTabIdentifier();
-        }
-        return HOME_BROWSE_ID.equals(browseId) || SUBSCRIPTIONS_BROWSE_ID.equals(browseId);
-    }
+    /**
+     * If the Subscriptions button is added without a label, as the other buttons of the A/B layout without labels.
+     */
+    private static volatile boolean subscriptionsIconOnly;
 
     /**
      * Injection point.
+     * <p>
+     * The A/B layout with Subscriptions as a tab of Home shows tabs at the top of Home, such as
+     * "Home, Subscriptions, Music, Live, More". The other tabs replace the filter bar of Home,
+     * so only the Subscriptions tab is removed, which is a navigation button again, and the other tabs
+     * are removed if the filter bar of the feeds is hidden. The Subscriptions feed opened by its navigation
+     * button has the same tabs, with its own tab selected, and shows only its tab.
      *
      * @param tabs Tab protos of the browse response.
-     * @return Only the selected tab, if the tabs are the Home and Subscriptions feeds.
+     * @return The tabs that are shown.
      */
     public static List<Object> filterBrowseTabs(List<Object> tabs) {
-        if (tabs == null || tabs.size() <= 1) return tabs;
+        if ((!DISABLE_TOOLBAR_NAVIGATION_TABS && !HIDE_FILTER_BAR_IN_FEED) || tabs == null || tabs.size() <= 1) {
+            return tabs;
+        }
 
         try {
-            int selectedIndex = 0;
+            final int size = tabs.size();
+            int selectedIndex = -1;
+            int subscriptionsIndex = -1;
+            boolean[] isFeedTab = new boolean[size];
             boolean isFeed = false;
-            for (int i = tabs.size() - 1; i >= 0; i--) {
+            for (int i = 0; i < size; i++) {
                 TabRenderer tabRenderer = BrowseTab.parseFrom(
                         ((MessageLite) tabs.get(i)).toByteArray()
                 ).getTabRenderer();
 
-                isFeed |= isFeedTab(tabRenderer);
+                String tabIdentifier = tabRenderer.getTabIdentifier();
+                String browseId = tabRenderer.getEndpoint().getBrowseEndpoint().getBrowseId();
+                if (browseId.isEmpty()) {
+                    browseId = tabIdentifier;
+                }
+                if (SUBSCRIPTIONS_BROWSE_ID.equals(browseId)) {
+                    subscriptionsIndex = i;
+                }
+                // The category tabs of Home also open the Home feed, but their tab identifier is the category,
+                // such as ATTRIBUTE_FILTER_TYPE_MUSIC_BROAD.
+                isFeedTab[i] = SUBSCRIPTIONS_BROWSE_ID.equals(browseId)
+                        || HOME_BROWSE_ID.equals(tabIdentifier.isEmpty() ? browseId : tabIdentifier);
+                isFeed |= isFeedTab[i];
                 if (tabRenderer.getSelected()) {
                     selectedIndex = i;
                 }
@@ -96,8 +138,20 @@ public final class ClassicSubscriptionsLayoutPatch {
             // Channels and other pages also use tabs.
             if (!isFeed) return tabs;
 
-            List<Object> filtered = new ArrayList<>(1);
-            filtered.add(tabs.get(selectedIndex));
+            List<Object> filtered = new ArrayList<>(size);
+            if (DISABLE_TOOLBAR_NAVIGATION_TABS && subscriptionsIndex >= 0 && subscriptionsIndex == selectedIndex) {
+                filtered.add(tabs.get(subscriptionsIndex));
+                return filtered;
+            }
+            for (int i = 0; i < size; i++) {
+                if (DISABLE_TOOLBAR_NAVIGATION_TABS && i == subscriptionsIndex) {
+                    continue;
+                }
+                if (HIDE_FILTER_BAR_IN_FEED && !isFeedTab[i] && i != selectedIndex) {
+                    continue;
+                }
+                filtered.add(tabs.get(i));
+            }
             return filtered;
         } catch (Exception ex) {
             Logger.printException(() -> "filterBrowseTabs failure", ex);
@@ -154,9 +208,7 @@ public final class ClassicSubscriptionsLayoutPatch {
     private static PivotBarItemRenderer getPivotBarItemRenderer(Object pivotBarItem) {
         try {
             if (!(pivotBarItem instanceof PivotBarItemInterface renderInterface)) {
-                if (Settings.DEBUG.get()) {
-                    Logger.printException(() -> "Debug: Unknown pivot bar class: " + pivotBarItem.getClass());
-                }
+                Logger.printExceptionIfDebug(() -> "Debug: Unknown pivot bar class: " + pivotBarItem.getClass());
             } else {
                 MessageLite messageLite = renderInterface.patch_getPivotBarItemRenderer();
                 if (messageLite != null) {
@@ -170,9 +222,42 @@ public final class ClassicSubscriptionsLayoutPatch {
     }
 
     @Nullable
-    private static String getPivotIdentifier(Object pivotBarItem) {
+    static PivotBarItemInfo getPivotBarItemInfo(Object pivotBarItem) {
         PivotBarItemRenderer renderer = getPivotBarItemRenderer(pivotBarItem);
-        return renderer == null ? null : renderer.getPivotIdentifier();
+        if (renderer != null) {
+            // The Search and Settings buttons of Morphe only change the accessibility label of the Home button.
+            String label = renderer.getAccessibility().getAccessibilityData().getLabel();
+            return new PivotBarItemInfo(renderer.getPivotIdentifier(),
+                    label.isEmpty() ? renderer.getTitle().getRuns().getText() : label);
+        }
+
+        // Navigation buttons without labels, if they are not converted to buttons with labels.
+        if (pivotBarItem instanceof PivotBarItemInterface renderInterface) {
+            MessageLite iconOnly = renderInterface.patch_getPivotBarIconOnlyItemRenderer();
+            if (iconOnly != null) {
+                try {
+                    var iconOnlyRenderer = PivotBarIconOnlyItemRendererBytes.parseFrom(iconOnly.toByteArray());
+                    return new PivotBarItemInfo(iconOnlyRenderer.getPivotIdentifier(),
+                            iconOnlyRenderer.getAccessibility().getRuns().getText());
+                } catch (Exception ex) {
+                    Logger.printException(() -> "Failed to parse PivotBarIconOnlyItemRenderer", ex);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @return Index of the 'You' button, or the size of the list if it's missing.
+     */
+    static int indexOfLibraryButton(List<Object> list) {
+        for (int i = 0, size = list.size(); i < size; i++) {
+            PivotBarItemInfo info = getPivotBarItemInfo(list.get(i));
+            if (info != null && LIBRARY_BROWSE_ID.equals(info.id())) {
+                return i;
+            }
+        }
+        return list.size();
     }
 
     /**
@@ -182,24 +267,53 @@ public final class ClassicSubscriptionsLayoutPatch {
      * @return If the Subscriptions button is missing.
      */
     public static boolean needsSubscriptionsPivotBarItem(List<Object> list) {
-        if (list == null || list.isEmpty()) return false;
+        if (!DISABLE_TOOLBAR_NAVIGATION_TABS || list == null || list.isEmpty()) return false;
 
-        PivotBarItemRenderer homeRenderer = null;
-        for (Object item : list) {
-            String pivotIdentifier = getPivotIdentifier(item);
-            if (SUBSCRIPTIONS_BROWSE_ID.equals(pivotIdentifier)) {
-                return false;
+        try {
+            YTIconType homeIconType = null;
+            boolean homeIconOnly = false;
+            for (Object item : list) {
+                PivotBarItemInfo info = getPivotBarItemInfo(item);
+                String pivotIdentifier = info == null ? null : info.id();
+                if (SUBSCRIPTIONS_BROWSE_ID.equals(pivotIdentifier)) {
+                    return false;
+                }
+                if (homeIconType == null && HOME_BROWSE_ID.equals(pivotIdentifier)) {
+                    PivotBarItemRenderer homeRenderer = getPivotBarItemRenderer(item);
+                    if (homeRenderer != null) {
+                        homeIconType = homeRenderer.getIcon().getYtIconType();
+                    } else if (item instanceof PivotBarItemInterface renderInterface) {
+                        // The A/B layout without labels, if its buttons are not converted to buttons with labels.
+                        MessageLite iconOnly = renderInterface.patch_getPivotBarIconOnlyItemRenderer();
+                        if (iconOnly != null) {
+                            homeIconType = Icon.parseFrom(PivotBarIconOnlyItemRendererBytes.parseFrom(
+                                    iconOnly.toByteArray()).getIcon()).getYtIconType();
+                            homeIconOnly = true;
+                        }
+                    }
+                }
             }
-            if (homeRenderer == null && HOME_BROWSE_ID.equals(pivotIdentifier)) {
-                homeRenderer = getPivotBarItemRenderer(item);
-            }
+            if (homeIconType == null) return false;
+
+            subscriptionsIconType = homeIconType == YTIconType.TAB_HOME_CAIRO
+                    ? YTIconType.TAB_SUBSCRIPTIONS_CAIRO
+                    : YTIconType.PIVOT_SUBSCRIPTIONS;
+            subscriptionsIconOnly = homeIconOnly;
+            return true;
+        } catch (Exception ex) {
+            Logger.printException(() -> "needsSubscriptionsPivotBarItem failure", ex);
         }
-        if (homeRenderer == null) return false;
+        return false;
+    }
 
-        subscriptionsIconType = homeRenderer.getIcon().getYtIconType() == YTIconType.TAB_HOME_CAIRO
-                ? YTIconType.TAB_SUBSCRIPTIONS_CAIRO
-                : YTIconType.PIVOT_SUBSCRIPTIONS;
-        return true;
+    /**
+     * Injection point.
+     * Called after {@link #needsSubscriptionsPivotBarItem(List)}.
+     *
+     * @return If the Subscriptions navigation button has no label.
+     */
+    public static boolean isSubscriptionsIconOnly() {
+        return subscriptionsIconOnly;
     }
 
     /**
@@ -227,21 +341,10 @@ public final class ClassicSubscriptionsLayoutPatch {
     public static List<Object> addSubscriptionsPivotBarItem(List<Object> list, @Nullable Object subscriptionsItem) {
         if (subscriptionsItem == null) return list;
 
-        // Classic layout: Subscriptions is after Shorts, or before You if Shorts is missing.
-        int index = list.size();
-        for (int i = 0, size = list.size(); i < size; i++) {
-            String pivotIdentifier = getPivotIdentifier(list.get(i));
-            if (SHORTS_BROWSE_ID.equals(pivotIdentifier)) {
-                index = i + 1;
-                break;
-            }
-            if (LIBRARY_BROWSE_ID.equals(pivotIdentifier)) {
-                index = i;
-            }
-        }
-
+        // Classic layout: Subscriptions is before You (after Create, if the server sends it),
+        // or the last button if 'You' is missing.
         List<Object> newList = new ArrayList<>(list);
-        newList.add(index, subscriptionsItem);
+        newList.add(indexOfLibraryButton(list), subscriptionsItem);
         return newList;
     }
 
@@ -250,6 +353,6 @@ public final class ClassicSubscriptionsLayoutPatch {
      * Navigation bar used before the guide response is loaded.
      */
     public static boolean hideOfflineSubscriptionsButton(boolean original) {
-        return false;
+        return !DISABLE_TOOLBAR_NAVIGATION_TABS && original;
     }
 }

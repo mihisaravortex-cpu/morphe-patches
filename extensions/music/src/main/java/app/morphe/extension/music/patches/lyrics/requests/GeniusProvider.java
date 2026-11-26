@@ -34,12 +34,14 @@ import app.morphe.extension.music.patches.lyrics.model.LyricsMerge;
 import app.morphe.extension.music.patches.lyrics.model.TrackInfo;
 import app.morphe.extension.music.patches.lyrics.parsers.LRCParser;
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.Utils;
 
 /**
  * Genius song pages, read through the public endpoints its own web app uses, so no client token
  * is needed. The search answers JSON; the lyrics only exist in the page markup, which makes this
  * the one provider that has to read HTML.
  */
+@SuppressWarnings("unused")
 public final class GeniusProvider implements LyricsProvider {
 
     private static final String SEARCH = "https://genius.com/api/search/multi?q=";
@@ -136,71 +138,13 @@ public final class GeniusProvider implements LyricsProvider {
             Map.entry("simplified chinese", "zh"),
             Map.entry("traditional chinese", "zh"));
 
-    private static String languageCode(String name) {
+    static String languageCode(String name) {
         String trimmed = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
         if (trimmed.isEmpty()) {
             return "";
         }
         String mapped = LANGUAGE_NAMES.get(trimmed);
         return mapped != null ? mapped : trimmed;
-    }
-
-    @Override
-    public String name() {
-        return "Genius";
-    }
-
-    /** One search, one page, no candidate fan-out: only the first accepted hit is read. */
-    @Nullable
-    @Override
-    public FetchResult fetch(TrackInfo track) throws Exception {
-        JSONObject hit = findBestHit(track);
-        if (hit == null) {
-            return null;
-        }
-        String title = hit.optString("title", "");
-        String artist = primaryArtistName(hit);
-        String url = hit.optString("url", "");
-        if (url.isEmpty()) {
-            return null;
-        }
-
-        long songId = hit.optLong("id", 0L);
-        JSONObject[] holder = new JSONObject[1];
-        Thread recordThread = new Thread(() -> holder[0] = songRecord(songId),
-                "Genius song record");
-        recordThread.start();
-
-        String html = fetchPage(url);
-        try {
-            recordThread.join(RECORD_JOIN_MS);
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-        }
-        JSONObject record = holder[0];
-
-        if (html == null) {
-            return null;
-        }
-        String text = lyricsText(html);
-        if (text == null || text.isEmpty()) {
-            return null;
-        }
-        LRCParser.PlainLyrics parsed = LRCParser.parsePlainWithSlots(text);
-        List<LyricsLine> lines = parsed.lines();
-        if (lines.isEmpty()) {
-            return null;
-        }
-
-        List<String> credits = record != null ? credits(record) : null;
-        Map<String, List<LyricsLine>> translations = record != null
-                ? translations(record, lines, text, parsed.slots())
-                : null;
-
-        return FetchResult.of(
-                new Lyrics(lines, "Genius", false, null, translations, null,
-                        credits, text, "txt", url, null),
-                title, artist, 0L, track);
     }
 
     /**
@@ -262,12 +206,12 @@ public final class GeniusProvider implements LyricsProvider {
     }
 
     /** A hit that is not a song shares the id space but has no lyric page. */
-    private static boolean isSong(JSONObject hit) {
+    static boolean isSong(JSONObject hit) {
         String type = hit.optString("_type", hit.optString("type", ""));
         return type.isEmpty() || "song".equals(type);
     }
 
-    private static String primaryArtistName(JSONObject hit) {
+    static String primaryArtistName(JSONObject hit) {
         JSONObject artist = hit.optJSONObject("primary_artist");
         return artist != null ? artist.optString("name", "") : "";
     }
@@ -303,7 +247,6 @@ public final class GeniusProvider implements LyricsProvider {
         return credits.isEmpty() ? null : credits;
     }
 
-    @SuppressWarnings("SizeReplaceableByIsEmpty")
     private static void addCredit(List<String> credits, String label,
                                   @Nullable JSONArray artists) {
         if (artists == null) {
@@ -319,12 +262,12 @@ public final class GeniusProvider implements LyricsProvider {
             if (name.isEmpty()) {
                 continue;
             }
-            if (names.length() > 0) {
+            if (Utils.isNotEmpty(names)) {
                 names.append(", ");
             }
             names.append(name);
         }
-        if (names.length() == 0) {
+        if (Utils.isEmpty(names)) {
             return;
         }
         // An empty label means the page shows the names on their own.
@@ -339,8 +282,8 @@ public final class GeniusProvider implements LyricsProvider {
      */
     @Nullable
     private static Map<String, List<LyricsLine>> translations(JSONObject record,
-                                                             List<LyricsLine> lines, String text,
-                                                             int[] slots) {
+                                                              List<LyricsLine> lines, String text,
+                                                              int[] slots) {
         String target = LyricsRequests.primarySubtag(LyricsRequests.translationLanguage());
         if (target.isEmpty()) {
             return null;
@@ -469,18 +412,15 @@ public final class GeniusProvider implements LyricsProvider {
 
     /**
      * @return Where source line {@code rawIndex} ended up in the parsed lyrics, or {@code -1}
-     *         when it has no line there because it was a heading, was past the end of the list,
-     *         or the index was out of range.
+     * when it has no line there because it was a heading, was past the end of the list,
+     * or the index was out of range.
      */
-    private static int lineOf(int rawIndex, int[] slots, int lineCount) {
+    static int lineOf(int rawIndex, int[] slots, int lineCount) {
         if (rawIndex < 0 || rawIndex >= slots.length) {
             return -1;
         }
         int at = slots[rawIndex];
         return at >= 0 && at < lineCount ? at : -1;
-    }
-
-    private record Section(int start, List<String> lines) {
     }
 
     private static List<Section> sections(String text) {
@@ -535,7 +475,7 @@ public final class GeniusProvider implements LyricsProvider {
         return out;
     }
 
-    private static boolean isSectionHeader(String trimmed) {
+    static boolean isSectionHeader(String trimmed) {
         return trimmed.length() > 2 && trimmed.startsWith("[") && trimmed.endsWith("]");
     }
 
@@ -653,11 +593,6 @@ public final class GeniusProvider implements LyricsProvider {
         return !Thread.currentThread().isInterrupted();
     }
 
-    private interface Reader<T> {
-        @Nullable
-        T read(HttpURLConnection connection) throws Exception;
-    }
-
     /** The wait Genius asks for, capped so a hostile header cannot stall the lookup. */
     private static long retryAfterMs(HttpURLConnection connection) {
         String value = connection.getHeaderField("Retry-After");
@@ -692,7 +627,6 @@ public final class GeniusProvider implements LyricsProvider {
      * are page furniture rather than lyrics (a translations menu, annotation links), so nesting is
      * tracked and anything inside {@code data-exclude-from-selection} is dropped.
      */
-    @SuppressWarnings("SizeReplaceableByIsEmpty")
     @Nullable
     static String lyricsText(@Nullable String html) {
         if (html == null || html.isEmpty()) {
@@ -738,13 +672,13 @@ public final class GeniusProvider implements LyricsProvider {
                 } else {
                     if (excludedAt < 0
                             && Objects.requireNonNull(tag.group(3)).contains(
-                                    "data-exclude-from-selection=\"true\"")) {
+                            "data-exclude-from-selection=\"true\"")) {
                         excludedAt = depth;
                     }
                     depth++;
                 }
             }
-            if (container.length() > 0) {
+            if (Utils.isNotEmpty(container)) {
                 out.append(container).append('\n');
             }
             from = at;
@@ -757,11 +691,77 @@ public final class GeniusProvider implements LyricsProvider {
         String[] split = decoded.split("\n", -1);
         StringBuilder joined = new StringBuilder(decoded.length());
         for (String line : split) {
-            if (joined.length() > 0) {
+            if (Utils.isNotEmpty(joined)) {
                 joined.append('\n');
             }
             joined.append(line.trim());
         }
         return BLANK_RUN.matcher(joined).replaceAll("\n\n").trim();
+    }
+
+    @Override
+    public String name() {
+        return "Genius";
+    }
+
+    /** One search, one page, no candidate fan-out: only the first accepted hit is read. */
+    @Nullable
+    @Override
+    public FetchResult fetch(TrackInfo track) throws Exception {
+        JSONObject hit = findBestHit(track);
+        if (hit == null) {
+            return null;
+        }
+        String title = hit.optString("title", "");
+        String artist = primaryArtistName(hit);
+        String url = hit.optString("url", "");
+        if (url.isEmpty()) {
+            return null;
+        }
+
+        long songId = hit.optLong("id", 0L);
+        JSONObject[] holder = new JSONObject[1];
+        Thread recordThread = new Thread(() -> holder[0] = songRecord(songId),
+                "Genius song record");
+        recordThread.start();
+
+        String html = fetchPage(url);
+        try {
+            recordThread.join(RECORD_JOIN_MS);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
+        JSONObject record = holder[0];
+
+        if (html == null) {
+            return null;
+        }
+        String text = lyricsText(html);
+        if (text == null || text.isEmpty()) {
+            return null;
+        }
+        LRCParser.PlainLyrics parsed = LRCParser.parsePlainWithSlots(text);
+        List<LyricsLine> lines = parsed.lines();
+        if (lines.isEmpty()) {
+            return null;
+        }
+
+        List<String> credits = record != null ? credits(record) : null;
+        Map<String, List<LyricsLine>> translations = record != null
+                ? translations(record, lines, text, parsed.slots())
+                : null;
+
+        return FetchResult.of(
+                new Lyrics(lines, "Genius", false, null, translations, null,
+                        null, credits, text, "txt", url, null, null),
+                title, artist, 0L, track);
+    }
+
+    private interface Reader<T> {
+        @Nullable
+        T read(HttpURLConnection connection) throws Exception;
+    }
+
+    private record Section(int start, List<String> lines) {
     }
 }

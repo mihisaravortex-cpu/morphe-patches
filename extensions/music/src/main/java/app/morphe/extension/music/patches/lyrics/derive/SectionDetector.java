@@ -26,22 +26,15 @@ import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 
 /**
- * Asks the AI which part of the song each lyric line belongs to, for lyrics that ship without any
- * section of their own. A label the provider published beats one inferred from the text, so only
- * lyrics that carry none at all are asked about.
- *
- * <p>The answer arrives one entry per line, with only the line opening a section named, so the
- * list maps straight onto {@link LyricsLine#songPart()}.
+ * Asks the AI which part of the song each lyric line belongs to, only for lyrics that ship
+ * without any section of their own: a provider-published label beats one inferred from the text.
+ * The answer names only the line opening a section, mapping straight onto {@link LyricsLine#songPart()}.
  */
 public final class SectionDetector {
 
     private static final ExecutorService executor = Executors.newCachedThreadPool();
 
     private static final String SKIP = "SKIP";
-
-    public interface Callback {
-        void onSections(@Nullable List<String> sections);
-    }
 
     private SectionDetector() {
     }
@@ -60,7 +53,7 @@ public final class SectionDetector {
     }
 
     public static void detect(TrackInfo track, Lyrics lyrics, BooleanSupplier stillWanted,
-            Callback callback) {
+                              Callback callback) {
         List<LyricsLine> lines = lyrics.lines();
         final List<String> texts = new ArrayList<>(lines.size());
         for (LyricsLine line : lines) {
@@ -75,7 +68,7 @@ public final class SectionDetector {
                     return;
                 }
                 List<String> cached = LyricsCache.getSectionAI(track, source, texts);
-                if (cached != null) {
+                if (hasAnySection(cached)) {
                     final List<String> result = cached;
                     Utils.runOnMainThread(() -> callback.onSections(result));
                     return;
@@ -86,8 +79,10 @@ public final class SectionDetector {
                 String model = Settings.LYRICS_AI_MODEL.get();
                 List<String> detected = aiDetect(texts, track.title(), track.artist(),
                         baseUrl, apiToken, model);
-                if (detected != null) {
+                if (hasAnySection(detected)) {
                     LyricsCache.putSectionAI(track, source, texts, detected);
+                } else {
+                    detected = null;
                 }
                 final List<String> result = detected;
                 Utils.runOnMainThread(() -> callback.onSections(result));
@@ -100,7 +95,7 @@ public final class SectionDetector {
 
     @Nullable
     private static List<String> aiDetect(List<String> lines, String title, String artist,
-            String baseUrl, String apiToken, String model) {
+                                         String baseUrl, String apiToken, String model) {
         String prompt = OpenAIClient.renderPrompt(Settings.LYRICS_AI_SECTION_PROMPT.get(),
                 "section", "", title, artist, lines);
         return OpenAIClient.mapLines(baseUrl, apiToken, model, prompt, lines);
@@ -131,8 +126,30 @@ public final class SectionDetector {
         }
         return new Lyrics(out, lyrics.providerName(), lyrics.synced(),
                 lyrics.romanization(), lyrics.translations(), lyrics.romanizations(),
-                lyrics.songwriters(), lyrics.rawFormat(), lyrics.formatType(),
-                lyrics.sourceUrl(), lyrics.about());
+                lyrics.songwriters(), lyrics.credits(), lyrics.rawFormat(),
+                lyrics.formatType(), lyrics.sourceUrl(), lyrics.about(), lyrics.agentNames());
+    }
+
+    /** {@return true when {@code label} is empty or an AI skip placeholder (e.g. {@code "SKIP: ..."})} */
+    public static boolean isSkipLabel(@Nullable String label) {
+        if (OpenAIClient.isSkipToken(label)) {
+            return true;
+        }
+        String t = label.trim();
+        return t.regionMatches(true, 0, SKIP, 0, SKIP.length())
+                && (t.length() == SKIP.length() || Character.isWhitespace(t.charAt(SKIP.length())));
+    }
+
+    private static boolean hasAnySection(@Nullable List<String> sections) {
+        if (sections == null) {
+            return false;
+        }
+        for (int i = 0; i < sections.size(); i++) {
+            if (getLabel(sections, i) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Nullable
@@ -140,13 +157,16 @@ public final class SectionDetector {
         String label = i < sections.size() ? sections.get(i) : null;
         if (label != null) {
             label = label.trim();
-            // mapLines already turns a skipped line into an empty entry; SKIP is accepted here
-            // as well so an answer that reached this method another way cannot be read as a
-            // section literally named "SKIP".
-            if (label.isEmpty() || SKIP.equalsIgnoreCase(label)) {
+            // mapLines already turns a skipped line into an empty entry; SKIP placeholders are
+            // rejected here too so cached or unparsed answers cannot become section labels.
+            if (isSkipLabel(label)) {
                 label = null;
             }
         }
         return label;
+    }
+
+    public interface Callback {
+        void onSections(@Nullable List<String> sections);
     }
 }

@@ -17,32 +17,56 @@ import app.morphe.patcher.InstructionLocation.MatchAfterWithin
 import app.morphe.patcher.checkCast
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
-import app.morphe.patcher.patch.BytecodePatch
-import app.morphe.patcher.patch.BytecodePatchBuilder
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.Patch
+import app.morphe.patcher.patch.PatchDefinition
+import app.morphe.patcher.patch.classDefBy
+import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.patch.patch
 import app.morphe.patcher.string
+import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patcher.util.getFreeRegisterProvider
+import app.morphe.patcher.util.getReference
+import app.morphe.patcher.util.matchSingle
+import app.morphe.patcher.util.proxy.mutableTypes.MutableClass
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
+import app.morphe.patches.shared.misc.litho.context.ConversionContextToStringFingerprint
 import app.morphe.patches.shared.misc.litho.context.EXTENSION_CONTEXT_INTERFACE
+import app.morphe.patches.shared.misc.litho.context.conversionContextClassDef
 import app.morphe.util.addInstructionsAtControlFlowLabel
-import app.morphe.util.getFreeRegisterProvider
-import app.morphe.util.getReference
+import app.morphe.util.findFieldFromToString
+import app.morphe.util.indexOfFirstInstruction
 import app.morphe.util.insertLiteralOverride
-import app.morphe.util.returnEarly
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
+import com.android.tools.smali.dexlib2.util.MethodUtil
 import java.lang.ref.WeakReference
 
 internal const val EXTENSION_CLASS = "Lapp/morphe/extension/shared/patches/components/LithoFilterPatch;"
 
 internal const val EXTENSION_FILTER = "[Lapp/morphe/extension/shared/patches/components/Filter;"
+
+private const val EXTENSION_ELEMENT_BYTES_INTERFACE =
+    $$"Lapp/morphe/extension/shared/patches/components/LithoFilterPatch$ElementBytesInterface;"
+
+private const val EXTENSION_LIST_ITEM_DECORATOR_INTERFACE =
+    $$"Lapp/morphe/extension/shared/patches/components/LithoFilterPatch$ListItemDecoratorInterface;"
+
+private const val EXTENSION_LIST_SECTION_INTERFACE =
+    $$"Lapp/morphe/extension/shared/patches/components/LithoFilterPatch$ListSectionInterface;"
+
+private const val COMMAND_EVENT_DATA_DECORATORS_PROPERTY = ", globalCommandEventDataDecoratorsInternal="
 
 // Registers used in extension helperMethod.
 private const val REGISTER_FILTER_CLASS = 0
@@ -83,14 +107,6 @@ fun addLithoFilter(classDescriptor: String) {
  *
  * The following pseudocode shows how this patch works:
  *
- * class SomeOtherClass {
- *    // Called before ComponentContextParser.parseComponent() method.
- *    public void someOtherMethod(ByteBuffer byteBuffer) {
- *        ExtensionClass.setProtoBuffer(byteBuffer); // Inserted by this patch.
- *        ...
- *   }
- * }
- *
  * class ComponentContextParser {
  *    public Component parseComponent() {
  *        ...
@@ -102,28 +118,27 @@ fun addLithoFilter(classDescriptor: String) {
  *    }
  * }
  *
- * @param hookNonNativeBuffer Whether to also insert the non-native ByteBuffer hook.
- *                            Older client versions push data through a non-native path; newer ones
- *                            (YouTube 20.22+, YT Music 9.x) always use the native Upb encode path.
- *                            Evaluated lazily inside execute so version flags are already set.
  * @param overrideUpbFeatureFlag Whether to override the A/B feature flag that enables Upb-native
  *                               protobuf parsing (only present on older YouTube; absent in Music).
+ * @param removeFilteredListItems Whether to remove the items of the lists (such as the feed) whose
+ *                                whole element is filtered. Otherwise, the grids, such as the feed
+ *                                of the tablet layout, show an empty cell in their place.
+ * @param hasReorderedListSections Whether the lists have sections that put their lists in the order that
+ *                                 fills the rows of the grid, such as the feed of the tablet layout.
  * @param block Callback to add app-specific dependencies (sharedExtensionPatch, conversionContextPatch,
  *              versionCheckPatch, and any app-specific fixes).
  */
 internal fun sharedLithoFilterPatch(
-    hookNonNativeBuffer: () -> Boolean,
     overrideUpbFeatureFlag: () -> Boolean,
-    useLegacyLithoFiltering: () -> Boolean,
-    block: BytecodePatchBuilder.() -> Unit,
-): BytecodePatch = bytecodePatch(
+    removeFilteredListItems: Boolean,
+    hasReorderedListSections: () -> Boolean,
+    block: PatchDefinition.() -> Unit,
+): Patch = patch(
     description = "Hooks the method which parses the bytes into a ComponentContext to filter components."
 ) {
     block()
 
     execute {
-        LithoFilterLegacyMethodFingerprint.method.returnEarly(useLegacyLithoFiltering())
-
         // Remove dummy filter from extenion static field
         // and add the filters included during patching.
         LithoFilterFingerprint.let {
@@ -160,23 +175,19 @@ internal fun sharedLithoFilterPatch(
             }
         }
 
-        // region Pass the buffer into extension.
-
-        if (hookNonNativeBuffer()) {
-            // Non-native buffer.
-            ProtobufBufferReferenceFingerprint.method.addInstruction(
-                0,
-                "invoke-static { p2 }, $EXTENSION_CLASS->setProtoBuffer(Ljava/nio/ByteBuffer;)V",
-            )
-        }
-
-        val protoBufferEncodeMethod = ProtobufBufferEncodeFingerprint.method
-
-        // endregion
-
-
         // region Modify the create component method and
         // if the component is filtered then return an empty component.
+
+        // The element is passed to the filter as is, and its bytes are encoded only if a filter
+        // of a matched identifier or path needs them. Every layout converts all its elements,
+        // and encoding each of them made every layout much slower.
+        ProtobufBufferEncodeFingerprint.let {
+            it.classDef.addPatchInterface(
+                EXTENSION_ELEMENT_BYTES_INTERFACE,
+                "patch_getElementBytes",
+                it.method
+            )
+        }
 
         // Find class and methods to create an empty component.
         val builderMethodDescriptor = EmptyComponentFingerprint.method
@@ -185,7 +196,7 @@ internal fun sharedLithoFilterPatch(
 
         // Find the method call that gets the value of 'buttonViewModel.accessibilityId'.
         val accessibilityIdMethod = AccessibilityIdFingerprint.instructionMatches.first()
-            .instruction.getReference<MethodReference>()!!
+            .methodReference
 
         // There's a method in the same class that gets the value of 'buttonViewModel.accessibilityText'.
         // As this class is abstract, we need to find another method that uses a method call.
@@ -207,7 +218,7 @@ internal fun sharedLithoFilterPatch(
                 // 'public final synthetic' or 'public final bridge synthetic'.
                 AccessFlags.SYNTHETIC.isSet(method.accessFlags)
             }
-        ).instructionMatches.first().instruction.getReference<MethodReference>()!!
+        ).instructionMatches.first().methodReference
 
         Fingerprint(
             returnType = "L",
@@ -235,7 +246,7 @@ internal fun sharedLithoFilterPatch(
                     insertIndex, 3, buttonViewModelRegister
                 )
                 val contextRegister = registerProvider.getFreeRegister()
-                val bufferRegister = registerProvider.getFreeRegister()
+                val elementRegister = registerProvider.getFreeRegister()
                 val freeRegister = registerProvider.getFreeRegister()
 
                 // We need to find a free register to store the accessibilityId and accessibilityText.
@@ -251,24 +262,9 @@ internal fun sharedLithoFilterPatch(
                 addInstructionsAtControlFlowLabel(
                     insertIndex,
                     """
-                        move-object/from16 v$bufferRegister, p3
-
-                        # Verify it's the expected subclass just in case.
-                        instance-of v$freeRegister, v$bufferRegister, ${protoBufferEncodeMethod.definingClass}
-                        if-eqz v$freeRegister, :empty_buffer
-
-                        check-cast v$bufferRegister, ${protoBufferEncodeMethod.definingClass}
-                        invoke-virtual { v$bufferRegister }, $protoBufferEncodeMethod
-                        move-result-object v$bufferRegister
-                        goto :hook
-
-                        :empty_buffer
-                        const/4 v$freeRegister, 0x0
-                        new-array v$bufferRegister, v$freeRegister, [B
-
-                        :hook
+                        move-object/from16 v$elementRegister, p3
                         move-object/from16 v$contextRegister, p2
-                        invoke-static { v$contextRegister, v$bufferRegister, v$accessibilityIdRegister, v$accessibilityTextRegister }, $EXTENSION_CLASS->isFiltered(${EXTENSION_CONTEXT_INTERFACE}[BLjava/lang/String;Ljava/lang/String;)Z
+                        invoke-static { v$contextRegister, v$elementRegister, v$accessibilityIdRegister, v$accessibilityTextRegister }, $EXTENSION_CLASS->isFiltered(${EXTENSION_CONTEXT_INTERFACE}Ljava/lang/Object;Ljava/lang/String;Ljava/lang/String;)Z
                         move-result v$freeRegister
                         if-eqz v$freeRegister, :unfiltered
 
@@ -308,6 +304,428 @@ internal fun sharedLithoFilterPatch(
                     """
                 )
             }
+        }
+
+        // endregion
+
+
+        // region Remove the items of the lists whose whole element is filtered.
+
+        if (removeFilteredListItems) {
+            // Gives the extension each created section of a class of sections, to remove the items from them.
+            // Only the constructors that call the constructor of the superclass, the others call those.
+            fun MutableClass.addListSectionOnCreate() {
+                methods.filter { method -> MethodUtil.isConstructor(method) }.forEach { constructor ->
+                    val superConstructorIndex = constructor.indexOfFirstInstruction(
+                        methodCall(
+                            opcode = Opcode.INVOKE_DIRECT,
+                            definingClass = superclass,
+                            name = "<init>"
+                        )
+                    )
+                    if (superConstructorIndex < 0) return@forEach
+
+                    // The instance the superclass was initialized with.
+                    val sectionRegister = constructor
+                        .getInstruction<FiveRegisterInstruction>(superConstructorIndex).registerC
+
+                    constructor.addInstruction(
+                        superConstructorIndex + 1,
+                        "invoke-static/range { v$sectionRegister .. v$sectionRegister }, $EXTENSION_CLASS->" +
+                                "addListSection($EXTENSION_LIST_SECTION_INTERFACE)V"
+                    )
+                }
+            }
+
+            // Give the extension the decorators of the conversion context.
+            val decoratorsMethod = commandEventDataDecoratorsFingerprint(
+                ConversionContextToStringFingerprint.method
+                    .findFieldFromToString(COMMAND_EVENT_DATA_DECORATORS_PROPERTY)
+            ).method
+
+            conversionContextClassDef.addPatchInterface(
+                EXTENSION_CONTEXT_INTERFACE,
+                "patch_getCommandEventDataDecorators",
+                decoratorsMethod,
+            )
+
+            // Give the extension the item that the decorator holds.
+            CommandEventDataDecoratorFingerprint.let {
+                val dataType = it.instructionMatches.first()
+                    .methodReference.definingClass
+                val itemField = classDefBy(dataType).fields.single { field ->
+                    field.type == "Ljava/lang/Object;"
+                }
+
+                mutableClassDefBy(
+                    it.instructionMatches.last().methodReference.definingClass
+                ).apply {
+                    val dataField = fields.single { field -> field.type == dataType }
+
+                    addPatchInterface(
+                        EXTENSION_LIST_ITEM_DECORATOR_INTERFACE,
+                        "patch_getListItem",
+                        """
+                            iget-object v0, p0, $dataField
+                            if-eqz v0, :no_data
+                            iget-object v0, v0, $itemField
+                            :no_data
+                            return-object v0
+                        """
+                    )
+                }
+            }
+
+            // Keep the observable lists, to remove the items from them.
+            // Some grids, such as the feed, have a list for each item.
+            ObservableListConstructorFingerprint.method.apply {
+                addInstruction(
+                    implementation!!.instructions.lastIndex,
+                    "invoke-static { p0 }, $EXTENSION_CLASS->addObservableList(Ljava/util/List;)V"
+                )
+            }
+
+            // Keep the sections of the lists, to remove the items from them. Some grids, such as
+            // the related videos, group the items of a section into rows, which the section lays
+            // out again when an item is removed.
+            ListSectionRemoveItemFingerprint.let {
+                val itemsField = it.instructionMatches[2].fieldReference
+                val removeItemMethod = it.method
+
+                // Removing an item does not lay out the rows again when the section is no longer
+                // a grid, such as when a single item is left, and the old rows that are views of
+                // the items would throw on the next access.
+                val (isGridMethod, layOutRowsMethod, updateSectionMethod) =
+                    ListSectionUpdateRowsFingerprint.instructionMatches.let { matches ->
+                        listOf(0, 3, 4).map { index ->
+                            matches[index].methodReference
+                        }
+                    }
+
+                // The element of an item of a grid, such as a Short of the grid of Shorts of the search results,
+                // has the position of the item in the grid, and the item is laid out for the column of its position.
+                // The items after a removed item move back by one position, also to another column.
+                val (elementItemType, elementBytesField) = ElementItemConstructorFingerprint.let { item ->
+                    item.classDef.type to item.instructionMatches[1].fieldReference
+                }
+
+                it.classDef.apply {
+                    addPatchInterface(
+                        EXTENSION_LIST_SECTION_INTERFACE,
+                        "patch_removeListItem",
+                        """
+                            iget-object v0, p0, $itemsField
+                            invoke-interface { v0, p1 }, Ljava/util/List;->indexOf(Ljava/lang/Object;)I
+                            move-result v2
+                            const/4 v0, 0x0
+                            if-ltz v2, :done
+                            const/4 v0, 0x1
+                            invoke-direct { p0 }, $isGridMethod
+                            move-result v1
+                            invoke-virtual { p0, p1 }, $removeItemMethod
+                            if-eqz v1, :done
+                            iget-object v3, p0, $itemsField
+                            invoke-interface { v3 }, Ljava/util/List;->size()I
+                            move-result v4
+                            :move_back
+                            if-ge v2, v4, :moved_back
+                            invoke-interface { v3, v2 }, Ljava/util/List;->get(I)Ljava/lang/Object;
+                            move-result-object v5
+                            add-int/lit8 v2, v2, 0x1
+                            instance-of v6, v5, $elementItemType
+                            if-eqz v6, :move_back
+                            check-cast v5, $elementItemType
+                            iget-object v5, v5, $elementBytesField
+                            invoke-static { v5 }, $EXTENSION_CLASS->moveGridItemBack([B)V
+                            goto :move_back
+                            :moved_back
+                            invoke-direct { p0 }, $isGridMethod
+                            move-result v1
+                            if-nez v1, :done
+                            iget-object v1, p0, $itemsField
+                            invoke-interface { v1 }, Ljava/util/List;->isEmpty()Z
+                            move-result v1
+                            if-nez v1, :done
+                            invoke-virtual { p0 }, $layOutRowsMethod
+                            invoke-virtual { p0 }, $updateSectionMethod
+                            :done
+                            return v0
+                        """
+                    )
+
+                    // The released sections stop receiving the removed items.
+                    ListSectionReleaseFingerprint.method.addInstruction(
+                        0,
+                        "invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->" +
+                                "removeListSection($EXTENSION_LIST_SECTION_INTERFACE)V"
+                    )
+
+                    addListSectionOnCreate()
+                }
+            }
+
+            // The element hooks hide some elements by removing their bytes, such as the YouTube Premium promotions.
+            // The Litho filter does not see these elements, so their items are removed when they are created.
+            ElementItemConstructorFingerprint.let {
+                it.method.apply {
+                    val elementBytesIndex = it.instructionMatches[1].index
+                    val elementBytesRegister = getInstruction<TwoRegisterInstruction>(elementBytesIndex).registerA
+
+                    addInstruction(
+                        elementBytesIndex + 1,
+                        "invoke-static { p0, v$elementBytesRegister }, $EXTENSION_CLASS->" +
+                                "removeHiddenElementListItem(Ljava/lang/Object;[B)V"
+                    )
+                }
+            }
+
+            // The grids of the tablet layout, such as the feed, have a list for each item in a section that puts
+            // its lists in the order that fills the rows of the grid, and lays out each list with more or less than
+            // one item as wide as the grid. A list emptied by removing its item then breaks its row, and the order
+            // leaves cells empty. So the list of the item is removed from the section instead.
+            if (hasReorderedListSections()) {
+                ReorderedListSectionFingerprint.let {
+                    val listsField = it.instructionMatches[0].fieldReference
+                    val sectionType = listsField.definingClass
+
+                    val (listField, removeListMethod) = ReorderedListSectionRemoveListFingerprint.let { remove ->
+                        remove.instructionMatches[2].fieldReference to remove.method
+                    }
+                    val listType = listField.type
+                    val listSizeMethodName = listSectionIsEmptyFingerprint(sectionType)
+                        .instructionMatches.first().methodReference.name
+
+                    // Only a list that holds just the item is removed, and not a section in the section,
+                    // which can get more items later.
+                    // Some app versions also have a parameter to put the lists in order again.
+                    val removeList = if (removeListMethod.parameterTypes.size == 2) {
+                        "invoke-virtual { p0, v2, v4 }, $removeListMethod"
+                    } else {
+                        "invoke-virtual { p0, v2 }, $removeListMethod"
+                    }
+
+                    it.classDef.apply {
+                        addPatchInterface(
+                            EXTENSION_LIST_SECTION_INTERFACE,
+                            "patch_removeListItem",
+                            """
+                                iget-object v0, p0, $listsField
+                                invoke-interface { v0 }, Ljava/util/List;->size()I
+                                move-result v1
+                                const/4 v4, 0x1
+                                :next_list
+                                add-int/lit8 v1, v1, -0x1
+                                if-ltz v1, :not_found
+                                invoke-interface { v0, v1 }, Ljava/util/List;->get(I)Ljava/lang/Object;
+                                move-result-object v2
+                                check-cast v2, ${listField.definingClass}
+                                iget-object v2, v2, $listField
+                                instance-of v3, v2, $sectionType
+                                if-nez v3, :next_list
+                                invoke-interface { v2 }, $listType->$listSizeMethodName()I
+                                move-result v3
+                                if-ne v3, v4, :next_list
+                                invoke-interface { v2, p1 }, $listType->contains(Ljava/lang/Object;)Z
+                                move-result v3
+                                if-eqz v3, :next_list
+                                $removeList
+                                return v4
+                                :not_found
+                                const/4 v0, 0x0
+                                return v0
+                            """
+                        )
+
+                        addListSectionOnCreate()
+                    }
+                }
+            }
+
+            // The view of an item of a Litho list keeps the size it was laid out with when the item is updated with
+            // new render info, such as when a section puts its lists in another order after an item was removed. An
+            // item that is laid out as wide as the list, such as a shelf, is then drawn as small as a cell of the grid,
+            // and a card in its place as wide as the list. So the view is bound again if only one of them is that wide.
+            LithoBinderUpdateItemFingerprint.let { update ->
+                val renderInfoType = update.method.parameterTypes[1].toString()
+                val isFullSpanMethodName = RenderInfoIsFullSpanFingerprint.method.name
+
+                listOf(update.method, LithoBinderUpdateItemRangeFingerprint.method).forEach { updateMethod ->
+                    lithoBinderUpdateRenderInfoFingerprint(
+                        updateMethod.definingClass,
+                        updateMethod.name,
+                        updateMethod.parameterTypes.map { type -> type.toString() },
+                        renderInfoType
+                    ).let {
+                        it.method.apply {
+                            val oldRenderInfoMethod = it.instructionMatches[0].methodReference
+                            val itemRegister = getInstruction<FiveRegisterInstruction>(
+                                it.instructionMatches[0].index
+                            ).registerC
+                            val bindAgainIndex = it.instructionMatches[3].index
+                            val bindAgainRegister = getInstruction<OneRegisterInstruction>(bindAgainIndex).registerA
+                            val newRenderInfoRegister = getInstruction<FiveRegisterInstruction>(
+                                it.instructionMatches[4].index
+                            ).registerD
+
+                            addInstructionsWithLabels(
+                                bindAgainIndex + 1,
+                                """
+                                    if-nez v$bindAgainRegister, :bound_again
+                                    invoke-virtual { v$itemRegister }, $oldRenderInfoMethod
+                                    move-result-object v$bindAgainRegister
+                                    invoke-interface { v$bindAgainRegister }, $renderInfoType->$isFullSpanMethodName()Z
+                                    move-result v$bindAgainRegister
+                                    if-eqz v$bindAgainRegister, :old_not_full_span
+                                    invoke-interface { v$newRenderInfoRegister }, $renderInfoType->$isFullSpanMethodName()Z
+                                    move-result v$bindAgainRegister
+                                    xor-int/lit8 v$bindAgainRegister, v$bindAgainRegister, 0x1
+                                    goto :bound_again
+                                    :old_not_full_span
+                                    invoke-interface { v$newRenderInfoRegister }, $renderInfoType->$isFullSpanMethodName()Z
+                                    move-result v$bindAgainRegister
+                                    :bound_again
+                                    nop
+                                """
+                            )
+                        }
+                    }
+                }
+            }
+
+            // region Sticky headers
+
+            // Removing the items changes the lists while they load, which makes two races of the sticky headers
+            // of the watch page frequent.
+
+            // The list item of a sticky header is hidden while its copy is shown, and then gets back the alpha
+            // it had before. An item just added to the list can still have alpha 0 from the animation of the list,
+            // so it stays hidden, also when the list reuses its view for another item, such as the action buttons
+            // or a video. Such an item is restored as a shown item.
+            StickyHeaderRestoreItemFingerprint.let {
+                val alphaField = it.instructionMatches[1].fieldReference
+
+                it.method.addInstructionsWithLabels(
+                    0,
+                    """
+                        iget v0, p0, $alphaField
+                        const/4 v1, 0x0
+                        cmpl-float v0, v0, v1
+                        if-nez v0, :restore
+                        const/high16 v0, 0x3f800000    # 1.0f
+                        iput v0, p0, $alphaField
+                        :restore
+                        nop
+                    """
+                )
+            }
+
+            // The copy of a header is created later, at the position saved when it was posted. If the list
+            // changed in the meantime, such as when the placeholders of the loading page are replaced while
+            // scrolling, the copy shows another item, which stays over the list. The position of the current
+            // header is used instead.
+            val stickyHeadersClass = StickyHeadersFingerprint.classDef
+            stickyHeaderCreateFingerprint(stickyHeadersClass.type).matchSingle().let {
+                val currentId = it.instructionMatches.last().methodReference
+                val headerList = stickyHeaderCurrentIdFingerprint(currentId.definingClass, currentId.name).matchSingle()
+                val headerIndexField = headerList.instructionMatches[0].fieldReference
+                val headerEntriesField = headerList.instructionMatches[1].fieldReference
+                val entryType = headerList.instructionMatches[3].instruction.getReference<TypeReference>()!!.type
+                val entryPositionField = stickyHeaderEntryCompareFingerprint(entryType).matchSingle()
+                    .instructionMatches.first().fieldReference
+                val headerListField = stickyHeadersClass.instanceFields.single { field ->
+                    field.type == currentId.definingClass
+                }
+
+                it.method.apply {
+                    val viewTypeIndex = it.instructionMatches[2].index
+                    val container = getInstruction<TwoRegisterInstruction>(it.instructionMatches[1].index)
+                    val viewTypeCall = getInstruction<FiveRegisterInstruction>(viewTypeIndex)
+                    val stickyHeadersRegister = container.registerB
+                    val positionRegister = viewTypeCall.registerD
+                    val registerProvider = getFreeRegisterProvider(
+                        viewTypeIndex,
+                        2,
+                        stickyHeadersRegister,
+                        container.registerA,
+                        viewTypeCall.registerC,
+                        positionRegister
+                    )
+                    val headerListRegister = registerProvider.getFreeRegister()
+                    val headerIndexRegister = registerProvider.getFreeRegister()
+
+                    addInstructionsWithLabels(
+                        viewTypeIndex,
+                        """
+                            iget-object v$headerListRegister, v$stickyHeadersRegister, $headerListField
+                            iget v$headerIndexRegister, v$headerListRegister, $headerIndexField
+                            if-ltz v$headerIndexRegister, :saved_position
+                            iget-object v$headerListRegister, v$headerListRegister, $headerEntriesField
+                            invoke-interface { v$headerListRegister, v$headerIndexRegister }, Ljava/util/List;->get(I)Ljava/lang/Object;
+                            move-result-object v$headerListRegister
+                            check-cast v$headerListRegister, $entryType
+                            iget v$positionRegister, v$headerListRegister, $entryPositionField
+                            :saved_position
+                            nop
+                        """
+                    )
+                }
+            }
+
+            // endregion
+
+            // region Scroll position
+
+            // A list, such as the search results, saves its scroll position when it is left, such as when a video
+            // is opened, and shows it again when the list is loaded again. The position is not saved if an item
+            // before it was removed or changed since the list was loaded, and the list is then shown from the top.
+            // The removed items of the filtered elements are such items. The list is loaded again with them,
+            // so the saved position is moved by the items removed before it.
+            ListSaveScrollPositionFingerprint.let {
+                val observerType = it.instructionMatches[0].fieldReference.type
+
+                val notifyItemsRemoved = ObservableListRemoveFingerprint
+                    .matchSingle().instructionMatches.first().methodReference.let { notify ->
+                        if (notify.parameterTypes.size == 2) {
+                            notify
+                        } else {
+                            listNotifyItemRemovedFingerprint(notify.definingClass, notify.name)
+                                .matchSingle().instructionMatches.first().methodReference
+                        }
+                    }
+                val itemsRemovedMethodName = listNotifyItemsRemovedFingerprint(
+                    notifyItemsRemoved.definingClass,
+                    notifyItemsRemoved.name
+                ).matchSingle().instructionMatches.first().methodReference.name
+
+                listObserverItemsRemovedFingerprint(observerType, itemsRemovedMethodName)
+                    .matchSingle().method.addInstruction(
+                        0,
+                        "invoke-static { p0, p1, p2 }, $EXTENSION_CLASS->onListItemsRemoved(Ljava/lang/Object;II)V"
+                    )
+
+                listObserverReloadFingerprint(observerType).matchSingle().method.addInstruction(
+                    0,
+                    "invoke-static { p0 }, $EXTENSION_CLASS->onListReloaded(Ljava/lang/Object;)V"
+                )
+
+                it.method.apply {
+                    val observerIndex = it.instructionMatches[0].index
+                    val observerRegister = getInstruction<TwoRegisterInstruction>(observerIndex).registerA
+                    val notSavedIndex = it.instructionMatches[3].index
+                    val positionRegister = getInstruction<OneRegisterInstruction>(notSavedIndex).registerA
+
+                    replaceInstruction(notSavedIndex, "nop")
+                    addInstructions(
+                        observerIndex + 1,
+                        """
+                            invoke-static { v$observerRegister, v$positionRegister }, $EXTENSION_CLASS->getScrollPosition(Ljava/lang/Object;I)I
+                            move-result v$positionRegister
+                        """
+                    )
+                }
+            }
+
+            // endregion
         }
 
         // endregion

@@ -13,6 +13,7 @@ import static app.morphe.extension.shared.StringRef.str;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.Resources;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
@@ -28,6 +29,7 @@ import android.view.KeyEvent;
 import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -40,6 +42,8 @@ import java.util.concurrent.CopyOnWriteArraySet;
 import app.morphe.extension.music.settings.Settings;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.settings.Setting;
+import app.morphe.extension.shared.spoof.ClientType;
 import app.morphe.extension.shared.spoof.SpoofVideoStreamsPatch;
 
 /**
@@ -48,6 +52,24 @@ import app.morphe.extension.shared.spoof.SpoofVideoStreamsPatch;
  */
 @SuppressWarnings("unused")
 public class CrossfadePatch {
+
+    /**
+     * The outgoing song of a SABR stream falls silent on the track change, so crossfade needs
+     * a spoofed client without SABR.
+     */
+    public static final class CrossfadeAvailability implements Setting.Availability {
+        @Override
+        public boolean isAvailable() {
+            return SpoofVideoStreamsPatch.isPatchIncluded()
+                    && Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE.isAvailable()
+                    && !Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE.get().requireSABR;
+        }
+
+        @Override
+        public List<Setting<?>> getParentSettings() {
+            return List.of(Settings.SPOOF_VIDEO_STREAMS, Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE);
+        }
+    }
 
     public enum CrossFadeDuration {
         MILLISECONDS_250(250),
@@ -86,6 +108,10 @@ public class CrossfadePatch {
          * Lives in the player's audio offload listener set, not in its ListenerSet.
          */
         Object patch_getCoordinatorListener();
+        /**
+         * The volume the app last set on its player, which includes its volume normalization.
+         */
+        float patch_getVolume();
     }
 
     public interface ExoPlayerAccess {
@@ -278,10 +304,26 @@ public class CrossfadePatch {
         return suppressCwhU ? NO_OP_RUNNABLE : runnable;
     }
 
+    private static final List<Intent> heldAudioEffectSessionCloses = new ArrayList<>();
+
     /**
-     * Changing the setting restarts the app, so it is read once.
+     * Injection point. The app closes the audio effect session of the old player as soon as
+     * the new player reports its own, which detaches equalizers from a track that still fades out.
      */
-    private static final boolean CROSSFADE_ENABLED = Settings.CROSSFADE_ENABLED.get();
+    public static void closeAudioEffectSession(Context context, Intent intent) {
+        if (crossfadeInProgress) {
+            // Copied, the app reuses the intent.
+            heldAudioEffectSessionCloses.add(new Intent(intent));
+        } else {
+            context.sendBroadcast(intent);
+        }
+    }
+
+    /**
+     * Changing the setting or the spoofed client restarts the app, so it is read once.
+     */
+    private static final boolean CROSSFADE_ENABLED = Settings.CROSSFADE_ENABLED.get()
+            && Settings.CROSSFADE_ENABLED.isAvailable();
 
     /**
      * The internal second stopVideo(5) arrives about 1 ms after the first, a real double skip 200 ms+.
@@ -330,6 +372,10 @@ public class CrossfadePatch {
     private static volatile ExoPlayerAccess pendingOutPlayer = null;
     private static volatile PlayerCoordinatorAccess activeCoordinator = null;
     private static volatile float currentFadeInVolume = 0.0f;
+    /**
+     * Kept for the outgoing player, the coordinator's volume changes to the one of the next track.
+     */
+    private static volatile float outgoingAppVolume = 1.0f;
 
     private static final List<FadingPlayer> fadingOutPlayers =
             Collections.synchronizedList(new ArrayList<>());
@@ -352,6 +398,7 @@ public class CrossfadePatch {
     private static class FadingPlayer {
         final ExoPlayerAccess player;
         final float startVolume;
+        final float appVolume = outgoingAppVolume;
         final long startTimeMs;
         final long fadeDurationMs;
         final FadeCurve curve;
@@ -379,9 +426,9 @@ public class CrossfadePatch {
             long elapsed = System.currentTimeMillis() - startTimeMs;
             float t = Math.min(1.0f, (float) elapsed / fadeDurationMs);
             if (curve != null) {
-                return curve.out(t);
+                return appVolume * curve.out(t);
             }
-            return startVolume * (1.0f - t);
+            return appVolume * startVolume * (1.0f - t);
         }
 
         boolean isComplete() {
@@ -524,7 +571,14 @@ public class CrossfadePatch {
             // change. The old song falls silent within about a second, whatever its buffer reports (#2748).
             if (isSabrStream()) {
                 logDebug(() -> "stopVideo(5): skip, SABR stream");
-                showSabrToastOnce();
+                if (!sabrToastShown) {
+                    sabrToastShown = true;
+                    // The spoofed client failed and playback fell back to a client with SABR.
+                    ClientType client = Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE.get();
+                    Utils.showToastShort(str(client == ClientType.VISIONOS_1_02 || client == ClientType.VISIONOS_1_06
+                            ? "morphe_music_crossfade_visionos_toast"
+                            : "morphe_music_crossfade_spoof_client_toast"));
+                }
                 return false;
             }
 
@@ -577,7 +631,7 @@ public class CrossfadePatch {
             try {
                 if (outgoingWasPlaying) {
                     currentExo.patch_setPlayWhenReady(true);
-                    currentExo.patch_setVolume(1.0f);
+                    currentExo.patch_setVolume(outgoingAppVolume);
                     logDebug(() -> "9.x: re-enabled outgoing player @" + System.identityHashCode(currentExo));
                 } else {
                     currentExo.patch_setVolume(0.0f);
@@ -674,6 +728,7 @@ public class CrossfadePatch {
     private static void beginCrossfade(PlayerCoordinatorAccess coordinator,
                                        ExoPlayerAccess outgoing, ExoPlayerAccess incoming) {
         incoming.patch_setVolume(0.0f);
+        outgoingAppVolume = coordinator.patch_getVolume();
         pendingOutPlayer = outgoing;
         pendingInPlayer = incoming;
         activeCoordinator = coordinator;
@@ -754,12 +809,6 @@ public class CrossfadePatch {
     }
 
     private static volatile boolean sabrToastShown = false;
-
-    private static void showSabrToastOnce() {
-        if (sabrToastShown) return;
-        sabrToastShown = true;
-        Utils.showToastShort(str("morphe_music_crossfade_sabr_toast"));
-    }
 
     private static ExoPlayerAccess createNewPlayer(PlayerCoordinatorAccess coordinator) {
         try {
@@ -1124,7 +1173,7 @@ public class CrossfadePatch {
         if (outgoing != null && autoAdvanceCrossfadeActive) {
             pendingOutPlayer = null;
             removeFromFading(outgoing);
-            try { outgoing.patch_setVolume(1.0f); } catch (Exception ignored) {}
+            try { outgoing.patch_setVolume(outgoingAppVolume); } catch (Exception ignored) {}
             releaseWhenEnded(outgoing);
         }
         resetCrossfade();
@@ -1435,7 +1484,7 @@ public class CrossfadePatch {
             swapCoordinatorPlayer(coordinator, currentExo, newExo);
 
             currentExo.patch_setPlayWhenReady(true);
-            currentExo.patch_setVolume(1.0f);
+            currentExo.patch_setVolume(outgoingAppVolume);
             outgoingAwaitingLoad = currentExo;
 
             logInfo(() -> "repeat-single: re-issuing loadVideo (same song) onto @"
@@ -1475,7 +1524,7 @@ public class CrossfadePatch {
             logDebug(() -> "abortCrossfadeNow: snapping to player @"
                     + System.identityHashCode(bestPlayer));
             try {
-                bestPlayer.patch_setVolume(1.0f);
+                bestPlayer.patch_setVolume(coord.patch_getVolume());
                 bestPlayer.patch_setPlayWhenReady(true);
                 coord.patch_setExoPlayer(bestPlayer);
                 VideoSurfaceAccess surface =
@@ -1509,6 +1558,14 @@ public class CrossfadePatch {
         }
     }
 
+    /**
+     * Crossfade volumes are applied on top of the app's own volume, to keep its volume normalization.
+     */
+    private static float appVolume() {
+        PlayerCoordinatorAccess coordinator = activeCoordinator;
+        return coordinator == null ? 1.0f : coordinator.patch_getVolume();
+    }
+
     private static void clearCrossfadeState() {
         crossfadeInPlayer = null;
         pendingInPlayer = null;
@@ -1520,6 +1577,10 @@ public class CrossfadePatch {
         outgoingFadePreStarted = false;
         outgoingAwaitingLoad = null;
         currentFadeInVolume = 0.0f;
+        for (Intent intent : heldAudioEffectSessionCloses) {
+            Utils.getContext().sendBroadcast(intent);
+        }
+        heldAudioEffectSessionCloses.clear();
     }
 
     private static void animateCrossfade(final ExoPlayerAccess inPlayer, final long durationOverrideMs) {
@@ -1557,7 +1618,7 @@ public class CrossfadePatch {
                 currentFadeInVolume = inVol;
 
                 try {
-                    inPlayer.patch_setVolume(inVol);
+                    inPlayer.patch_setVolume(inVol * appVolume());
                     if (elapsed % 500 < TICK_MS) {
                         int inState = inPlayer.patch_getPlaybackState();
                         logDebug(() -> String.format(Locale.US,
@@ -1574,7 +1635,7 @@ public class CrossfadePatch {
                     logDebug(() -> "Fade-in complete for @" + System.identityHashCode(inPlayer));
                     inVideoMode = false;
                     currentFadeInVolume = 1.0f;
-                    try { inPlayer.patch_setVolume(1.0f); } catch (Exception ignored) {}
+                    try { inPlayer.patch_setVolume(appVolume()); } catch (Exception ignored) {}
 
                     if (pendingInPlayer == null) {
                         clearCrossfadeState();
@@ -1766,14 +1827,14 @@ public class CrossfadePatch {
         ExoPlayerAccess pin = pendingInPlayer;
         if (pin != null) {
             try {
-                pin.patch_setVolume(1.0f);
+                pin.patch_setVolume(appVolume());
                 if (stopKeptPlayer) {
                     pin.patch_setPlayWhenReady(false);
                     logInfo(() -> "cleanupAllPlayers: paused kept coordinator player @"
                             + System.identityHashCode(pin) + " (dismiss, stop dismissed track)");
                 } else {
                     logInfo(() -> "cleanupAllPlayers: restored kept coordinator player @"
-                            + System.identityHashCode(pin) + " volume -> 1.0 (#1671 silent-playback guard)");
+                            + System.identityHashCode(pin) + " volume (#1671 silent-playback guard)");
                 }
             } catch (Exception ignored) {}
         }
@@ -1784,7 +1845,7 @@ public class CrossfadePatch {
         ExoPlayerAccess cip = crossfadeInPlayer;
         if (cip != null && cip != pin) {
             try {
-                cip.patch_setVolume(1.0f);
+                cip.patch_setVolume(appVolume());
                 if (stopKeptPlayer) cip.patch_setPlayWhenReady(false);
             } catch (Exception ignored) {}
         }
@@ -1907,7 +1968,6 @@ public class CrossfadePatch {
      * The player swap flickers the MediaSession state, which receivers get as pause and
      * play commands, and strict ones drop the connection (#1549).
      */
-    @SuppressWarnings({"deprecation", "RedundantSuppression"})
     private static boolean isAudioRoutedToCast() {
         if (Build.VERSION.SDK_INT < 28) return false;
 
@@ -2186,7 +2246,7 @@ public class CrossfadePatch {
             "overlay_queue_shuffle_button_view"
     };
 
-    private static android.view.ViewTreeObserver.OnGlobalLayoutListener longPressLayoutListener;
+    private static ViewTreeObserver.OnGlobalLayoutListener longPressLayoutListener;
     private static WeakReference<View> longPressLayoutListenerHost = new WeakReference<>(null);
 
     /**

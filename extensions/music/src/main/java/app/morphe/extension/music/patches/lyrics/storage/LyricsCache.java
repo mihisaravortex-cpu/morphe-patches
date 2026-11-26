@@ -9,6 +9,7 @@ package app.morphe.extension.music.patches.lyrics.storage;
 
 import androidx.annotation.Nullable;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -18,23 +19,29 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import app.morphe.extension.music.patches.lyrics.LyricsDirectories;
+import app.morphe.extension.music.patches.lyrics.derive.OpenAIClient;
 import app.morphe.extension.music.patches.lyrics.model.Lyrics;
 import app.morphe.extension.music.patches.lyrics.model.LyricsLine;
 import app.morphe.extension.music.patches.lyrics.model.LyricsMerge;
 import app.morphe.extension.music.patches.lyrics.model.LyricsPreference;
 import app.morphe.extension.music.patches.lyrics.model.TrackInfo;
+import app.morphe.extension.music.patches.lyrics.model.Word;
 import app.morphe.extension.music.patches.lyrics.parsers.LRCParser;
 import app.morphe.extension.music.patches.lyrics.parsers.TTMLParser;
 import app.morphe.extension.music.patches.lyrics.requests.LyricsRequests;
+import app.morphe.extension.music.patches.lyrics.romanizers.ScriptDetector;
 import app.morphe.extension.music.settings.Settings;
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.Utils;
 
 /**
  * Two level lyrics store: an in memory map for the current session, and on disk so that replaying
@@ -50,14 +57,13 @@ public final class LyricsCache {
     private static final int DISK_ENTRIES = 5000;
 
     private static final int TRIM_EVERY_WRITES = 64;
-
-    private static int writesSinceTrim;
-
     private static final String HEADER_PROVIDER = "#provider=";
     private static final String HEADER_SYNCED = "#synced=";
     private static final String HEADER_SOURCE_URL = "#sourceUrl=";
     private static final String HEADER_FORMAT_TYPE = "#formatType=";
-    private static final String HEADER_SONGWRITERS = "#songwriters=";
+    /** Named for what it held before writers were split from credits, so old entries still read. */
+    private static final String HEADER_CREDITS = "#songwriters=";
+    private static final String HEADER_WRITERS = "#writers=";
     private static final String HEADER_ABOUT = "#about=";
     private static final String HEADER_QUERY_TITLE = "#queryTitle=";
     private static final String HEADER_QUERY_ARTIST = "#queryArtist=";
@@ -67,7 +73,6 @@ public final class LyricsCache {
     private static final String HEADER_TRACK = "#track=";
     private static final String NOT_FOUND_MARKER = "#notfound";
     private static final String RAW_SUFFIX = ".raw";
-
     private static final Map<String, Lyrics> memoryCache = Collections.synchronizedMap(
             new LinkedHashMap<>(MEMORY_INITIAL_CAPACITY, 0.75f, true) {
                 @Override
@@ -75,13 +80,13 @@ public final class LyricsCache {
                     return size() > MEMORY_MAX_ENTRIES;
                 }
             });
-
     /**
      * The video each entry was stored for, per cache key, mirroring {@link #memoryCache}. Null
      * means the entry was written without one and stays valid for whatever plays next.
      */
     private static final Map<String, String> videoIdByKey =
             Collections.synchronizedMap(new HashMap<>());
+    private static int writesSinceTrim;
 
     private LyricsCache() {
     }
@@ -127,7 +132,9 @@ public final class LyricsCache {
     }
 
     private static void writeEmbedded(String key, Lyrics lyrics) {
-        writeEmbeddedRomanization(key, lyrics.romanization());
+        if (LyricsMerge.hasText(lyrics.romanization())) {
+            writeLyricsLineList(embeddedRomanizationFile(key), lyrics.romanization());
+        }
         writeEmbeddedTranslations(key, lyrics.translations());
     }
 
@@ -243,16 +250,15 @@ public final class LyricsCache {
     }
 
     /**
-     * Stores what the user picked for this track. Read and written on a background thread.
-     * The lyric is written under the video id, which one playback never changes, and again
-     * under the track alone, which answers while the video id is not known yet. Both name
-     * the video they were written for, so neither answers a different upload of the same
-     * metadata, whose lyrics are the provider's to pick again.
+     * Stores what the user picked for this track, read and written on a background thread. The
+     * lyric is written under the video id, which one playback never changes, and again under the
+     * track alone, which answers before the video id is known. Both name the video they were
+     * written for, so neither answers a different upload of the same metadata.
      */
     public static void putPreference(@Nullable String videoId, TrackInfo track,
-                              @Nullable String queryTitle,
-                              @Nullable String queryArtist, Lyrics preferred,
-                              List<String> queue, @Nullable String fingerprint) {
+                                     @Nullable String queryTitle,
+                                     @Nullable String queryArtist, Lyrics preferred,
+                                     List<String> queue, @Nullable String fingerprint) {
         File file = preferenceFile(videoId, track);
         File fileByTrack = preferenceFile(null, track);
         if ((file == null && fileByTrack == null) || preferred == null
@@ -295,8 +301,8 @@ public final class LyricsCache {
 
     /**
      * Writes the preference file and the translations and romanization that go with it. The
-     * sidecars are dropped first, so a write that only gets as far as the file leaves the
-     * content without them instead of with the ones of an older, differently filtered lyric.
+     * sidecars are dropped first. If writing stops after the file, the content is left without
+     * them instead of with the ones of an older, differently filtered lyric.
      */
     private static void writePreference(@Nullable String videoId, TrackInfo track,
                                         @Nullable File file, List<String> fileLines,
@@ -334,7 +340,10 @@ public final class LyricsCache {
             fileLines.add(HEADER_FORMAT_TYPE + lyrics.formatType());
         }
         if (lyrics.songwriters() != null && !lyrics.songwriters().isEmpty()) {
-            fileLines.add(HEADER_SONGWRITERS + String.join("␟", lyrics.songwriters()));
+            fileLines.add(HEADER_WRITERS + String.join("␟", lyrics.songwriters()));
+        }
+        if (lyrics.credits() != null && !lyrics.credits().isEmpty()) {
+            fileLines.add(HEADER_CREDITS + String.join("␟", lyrics.credits()));
         }
         // Paragraphs split on a character no line can hold: an unescaped newline would end
         // the headers and the description would read back as lyrics.
@@ -364,67 +373,189 @@ public final class LyricsCache {
     }
 
     @Nullable
+    private static List<String> sanitizeTranslationList(@Nullable List<String> list, @Nullable File file) {
+        if (list == null) return null;
+        boolean anyMeaningful = false;
+        List<String> sanitized = new ArrayList<>(list.size());
+        for (String s : list) {
+            if (s == null || OpenAIClient.isSkipToken(s)) {
+                sanitized.add("");
+            } else {
+                sanitized.add(s);
+                anyMeaningful = true;
+            }
+        }
+        if (!anyMeaningful) {
+            if (file != null) discard(file);
+            return null;
+        }
+        return sanitized;
+    }
+
+    @Nullable
     public static List<String> getTranslation(TrackInfo track,
-                                       String source,
-                                       String language,
-                                       List<String> sourceLines) {
-        return readStringList(translationFile(track, source, language, sourceLines), sourceLines);
+                                              String source,
+                                              String language,
+                                              List<String> sourceLines) {
+        File file = translationFile(track, source, language, sourceLines);
+        List<String> raw = readStringList(file, sourceLines);
+        return sanitizeTranslationList(raw, file);
     }
 
     public static void putTranslation(TrackInfo track,
-                                String source,
-                                String language,
-                                List<String> sourceLines,
-                                List<String> lines) {
-        writeStringList(translationFile(track, source, language, sourceLines), lines);
+                                      String source,
+                                      String language,
+                                      List<String> sourceLines,
+                                      List<String> lines) {
+        File file = translationFile(track, source, language, sourceLines);
+        List<String> clean = sanitizeTranslationList(lines, null);
+        if (clean != null) {
+            writeStringList(file, clean);
+        } else if (file != null) {
+            discard(file);
+        }
     }
 
     @Nullable
     public static List<String> getTranslationAI(TrackInfo track, String source,
-            String language, List<String> sourceLines) {
-        return readStringList(aiTranslationFile(track, source, language, sourceLines),
-                sourceLines);
+                                                String language, List<String> sourceLines, @Nullable String provider) {
+        File file = aiTranslationFile(track, source, language, sourceLines, provider);
+        List<String> raw = readStringList(file, sourceLines);
+        return sanitizeTranslationList(raw, file);
     }
 
     public static void putTranslationAI(TrackInfo track, String source,
-            String language, List<String> sourceLines, List<String> lines) {
-        writeStringList(aiTranslationFile(track, source, language, sourceLines), lines);
+                                        String language, List<String> sourceLines, List<String> lines,
+                                        @Nullable String provider) {
+        File file = aiTranslationFile(track, source, language, sourceLines, provider);
+        List<String> clean = sanitizeTranslationList(lines, null);
+        if (clean != null) {
+            writeStringList(file, clean);
+        } else if (file != null) {
+            discard(file);
+        }
     }
 
     @Nullable
     public static List<String> getSectionAI(TrackInfo track, String source,
-            List<String> sourceLines) {
+                                            List<String> sourceLines) {
         return readStringList(aiSectionFile(track, source, sourceLines), sourceLines);
     }
 
     public static void putSectionAI(TrackInfo track, String source,
-            List<String> sourceLines, List<String> sections) {
+                                    List<String> sourceLines, List<String> sections) {
         writeStringList(aiSectionFile(track, source, sourceLines), sections);
     }
 
     @Nullable
     public static List<LyricsLine> getRomanization(TrackInfo track,
-                                            String source,
-                                            List<String> sourceLines) {
+                                                   String source,
+                                                   List<String> sourceLines) {
         return readLyricsLineList(romanizationFile(track, source, sourceLines), sourceLines);
     }
 
     public static void putRomanization(TrackInfo track,
-                                String source,
-                                List<String> sourceLines,
-                                List<LyricsLine> lines) {
+                                       String source,
+                                       List<String> sourceLines,
+                                       List<LyricsLine> lines) {
         writeLyricsLineList(romanizationFile(track, source, sourceLines), lines);
+    }
+
+    /** Reads cached word-synced Google romanization lines (line text + per-word readings). */
+    @Nullable
+    public static List<LyricsLine> getWordRomanization(TrackInfo track,
+                                                       String source,
+                                                       List<String> sourceLines,
+                                                       List<LyricsLine> origLines) {
+        File file = wordRomanizationFile(track, source, sourceLines);
+        List<String> raw = readStringList(file, sourceLines);
+        if (raw == null || raw.size() != origLines.size()) {
+            return null;
+        }
+        List<LyricsLine> restored = new ArrayList<>(origLines.size());
+        for (int i = 0; i < origLines.size(); i++) {
+            LyricsLine orig = origLines.get(i);
+            String row = raw.get(i);
+            int tab = row.indexOf('\t');
+            String lineText = tab >= 0 ? row.substring(0, tab) : row;
+            List<Word> origWords = orig.words();
+            if (origWords.isEmpty()) {
+                restored.add(new LyricsLine(orig.startTimeMs(), orig.endTimeMs(), lineText,
+                        Collections.emptyList(), orig.agentId(), orig.isDuet(), orig.isBG(),
+                        orig.songPart()));
+                continue;
+            }
+            if (tab < 0) {
+                discard(file);
+                return null;
+            }
+            String[] wordRomajis = row.substring(tab + 1).split("␟", -1);
+            if (wordRomajis.length != origWords.size()) {
+                discard(file);
+                return null;
+            }
+            List<Word> words = new ArrayList<>(origWords.size());
+            for (int w = 0; w < origWords.size(); w++) {
+                Word ow = origWords.get(w);
+                words.add(new Word(ow.startMs(), ow.endMs(), ow.text(),
+                        wordRomajis[w], ow.endsWithSpace(), ow.ruby()));
+            }
+            restored.add(new LyricsLine(orig.startTimeMs(), orig.endTimeMs(), lineText, words,
+                    orig.agentId(), orig.isDuet(), orig.isBG(), orig.songPart()));
+        }
+        return restored;
+    }
+
+    /** Writes word-synced Google romanization lines so replays skip extra network lookups. */
+    public static void putWordRomanization(TrackInfo track,
+                                           String source,
+                                           List<String> sourceLines,
+                                           List<LyricsLine> lines) {
+        File file = wordRomanizationFile(track, source, sourceLines);
+        if (file == null || lines.size() != sourceLines.size()) {
+            return;
+        }
+        List<String> rows = new ArrayList<>(lines.size());
+        for (LyricsLine line : lines) {
+            StringBuilder row = new StringBuilder();
+            row.append(sanitizeSingleLine(line.text()).replace('\t', ' '));
+            List<Word> words = line.words();
+            if (!words.isEmpty()) {
+                row.append('\t');
+                for (int w = 0; w < words.size(); w++) {
+                    if (w > 0) row.append('␟');
+                    String rom = words.get(w).romaji();
+                    row.append(sanitizeSingleLine(rom).replace('\t', ' ').replace('␟', ' '));
+                }
+            }
+            rows.add(row.toString());
+        }
+        writeStringList(file, rows);
     }
 
     @Nullable
     public static List<LyricsLine> getRomanizationAI(TrackInfo track, String source,
-            List<String> sourceLines) {
-        return readLyricsLineList(aiRomanizationFile(track, source, sourceLines), sourceLines);
+                                                     List<String> sourceLines, @Nullable String provider) {
+        return readLyricsLineList(
+                aiRomanizationFile(track, source, sourceLines, provider), sourceLines);
     }
 
     public static void putRomanizationAI(TrackInfo track, String source,
-            List<String> sourceLines, List<LyricsLine> lines) {
-        writeLyricsLineList(aiRomanizationFile(track, source, sourceLines), lines);
+                                         List<String> sourceLines, List<LyricsLine> lines, @Nullable String provider) {
+        writeLyricsLineList(
+                aiRomanizationFile(track, source, sourceLines, provider), lines);
+    }
+
+    @Nullable
+    public static List<String> getRubyAI(TrackInfo track, String source,
+                                         List<String> sourceLines, @Nullable String provider) {
+        return readStringList(aiRubyFile(track, source, sourceLines, provider), sourceLines);
+    }
+
+    public static void putRubyAI(TrackInfo track, String source,
+                                 List<String> sourceLines, List<String> lines,
+                                 @Nullable String provider) {
+        writeStringList(aiRubyFile(track, source, sourceLines, provider), lines);
     }
 
     @Nullable
@@ -433,12 +564,26 @@ public final class LyricsCache {
                 "Could not read string list from cache", Function.identity());
     }
 
+    private static String sanitizeSingleLine(@Nullable String value) {
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        if (value.indexOf('\n') < 0 && value.indexOf('\r') < 0) {
+            return value;
+        }
+        return value.replace("\r\n", " ").replace('\n', ' ').replace('\r', ' ');
+    }
+
     private static void writeStringList(@Nullable File file, List<String> lines) {
         if (file == null) {
             return;
         }
         try {
-            Files.write(file.toPath(), lines, StandardCharsets.UTF_8);
+            List<String> clean = new ArrayList<>(lines.size());
+            for (String line : lines) {
+                clean.add(sanitizeSingleLine(line));
+            }
+            Files.write(file.toPath(), clean, StandardCharsets.UTF_8);
             noteCacheWrite();
         } catch (IOException ex) {
             Logger.printInfo(() -> "Could not write cache", ex);
@@ -447,7 +592,7 @@ public final class LyricsCache {
 
     @Nullable
     private static List<LyricsLine> readLyricsLineList(@Nullable File file,
-            List<String> sourceLines) {
+                                                       List<String> sourceLines) {
         return readCachedLines(file, sourceLines.size(),
                 "Could not read lyrics line list from cache",
                 line -> new LyricsLine(LyricsLine.NO_TIME, line));
@@ -459,7 +604,7 @@ public final class LyricsCache {
      */
     @Nullable
     private static <T> List<T> readCachedLines(@Nullable File file, int expectedCount,
-            String logTag, Function<String, T> mapper) {
+                                               String logTag, Function<String, T> mapper) {
         if (file == null || !file.exists()) {
             return null;
         }
@@ -494,7 +639,7 @@ public final class LyricsCache {
         try {
             List<String> fileLines = new ArrayList<>(lines.size());
             for (LyricsLine line : lines) {
-                fileLines.add(line.text());
+                fileLines.add(sanitizeSingleLine(line.text()));
             }
             Files.write(file.toPath(), fileLines, StandardCharsets.UTF_8);
             noteCacheWrite();
@@ -505,13 +650,13 @@ public final class LyricsCache {
 
     @Nullable
     private static File translationFile(TrackInfo track, String source, String language,
-            List<String> sourceLines) {
+                                        List<String> sourceLines) {
         return derivedCacheFile(track, source, "." + language + ".txt", sourceLines);
     }
 
     @Nullable
     private static File romanizationFile(TrackInfo track, String source,
-            List<String> sourceLines) {
+                                         List<String> sourceLines) {
         // Only a chosen language changes the result, so "automatic" keeps the file it had.
         final String language = Settings.LYRICS_ROMANIZE_LANGUAGE.get();
         return derivedCacheFile(track, source,
@@ -521,16 +666,29 @@ public final class LyricsCache {
     }
 
     @Nullable
-    private static File aiTranslationFile(TrackInfo track, String source, String language,
-            List<String> sourceLines) {
+    private static File wordRomanizationFile(TrackInfo track, String source,
+                                             List<String> sourceLines) {
+        final String language = Settings.LYRICS_ROMANIZE_LANGUAGE.get();
         return derivedCacheFile(track, source,
-                ".ai." + aiConfigKey(Settings.LYRICS_AI_TRANSLATION_PROMPT.get())
+                LyricsRequests.isDefaultRomanizationLanguage()
+                        ? ".wrom.txt" : ".wrom." + language.toLowerCase(Locale.ROOT) + ".txt",
+                sourceLines);
+    }
+
+    @Nullable
+    private static File aiTranslationFile(TrackInfo track, String source, String language,
+                                          List<String> sourceLines, @Nullable String provider) {
+        // A result cached from one provider must not be read back as another provider's answer.
+        final String providerPrefix = provider == null ? "" : provider + ".";
+        return derivedCacheFile(track, source,
+                ".ai." + providerPrefix
+                        + aiConfigKey(Settings.LYRICS_AI_TRANSLATION_PROMPT.get())
                         + "." + language + ".txt", sourceLines);
     }
 
     @Nullable
     private static File aiSectionFile(TrackInfo track, String source,
-            List<String> sourceLines) {
+                                      List<String> sourceLines) {
         return derivedCacheFile(track, source,
                 ".ai." + aiConfigKey(Settings.LYRICS_AI_SECTION_PROMPT.get()) + ".sec.txt",
                 sourceLines);
@@ -538,11 +696,24 @@ public final class LyricsCache {
 
     @Nullable
     private static File aiRomanizationFile(TrackInfo track, String source,
-            List<String> sourceLines) {
-        // The prompt names the target language, so one file per language is needed.
+                                           List<String> sourceLines, @Nullable String provider) {
+        // The prompt names the target language, so one file per language is needed. The
+        // provider is in the name because each provider answers with its own model.
+        final String providerPrefix = provider == null ? "" : provider + ".";
         return derivedCacheFile(track, source,
-                ".ai." + aiConfigKey(Settings.LYRICS_AI_ROMANIZATION_PROMPT.get())
+                ".ai." + providerPrefix
+                        + aiConfigKey(Settings.LYRICS_AI_ROMANIZATION_PROMPT.get())
                         + ".rom." + LyricsRequests.romanizationLanguage() + ".txt", sourceLines);
+    }
+
+    @Nullable
+    private static File aiRubyFile(TrackInfo track, String source,
+                                   List<String> sourceLines, @Nullable String provider) {
+        final String providerPrefix = provider == null ? "" : provider + ".";
+        return derivedCacheFile(track, source,
+                ".ai." + providerPrefix
+                        + aiConfigKey(Settings.LYRICS_AI_RUBY_PROMPT.get())
+                        + ".ruby." + LyricsRequests.rubyLanguage() + ".txt", sourceLines);
     }
 
     private static String aiConfigKey(String prompt) {
@@ -554,7 +725,7 @@ public final class LyricsCache {
 
     @Nullable
     private static File derivedCacheFile(TrackInfo track, String source, String suffix,
-            List<String> sourceLines) {
+                                         List<String> sourceLines) {
         File directory = offlineDirectory();
         if (directory == null) {
             return null;
@@ -596,14 +767,13 @@ public final class LyricsCache {
                 + ".trans." + sanitizeFileComponent(language) + ".txt");
     }
 
-    @SuppressWarnings("SizeReplaceableByIsEmpty")
     private static String sanitizeFileComponent(String value) {
         StringBuilder sb = new StringBuilder(value.length());
         for (int i = 0; i < value.length(); i++) {
             char c = value.charAt(i);
             sb.append(Character.isLetterOrDigit(c) || c == '-' ? c : '_');
         }
-        return sb.length() == 0 ? "und" : sb.toString();
+        return Utils.isEmpty(sb) ? "und" : sb.toString();
     }
 
     @Nullable
@@ -686,20 +856,15 @@ public final class LyricsCache {
         }
     }
 
-    private static void writeEmbeddedRomanization(String key, @Nullable List<LyricsLine> romanization) {
-        if (!LyricsMerge.hasText(romanization)) {
-            return;
-        }
-        writeLyricsLineList(embeddedRomanizationFile(key), romanization);
-    }
-
     /**
      * Cache key that also captures the chosen lyrics source, so that switching
      * the source (for example to QQ or NetEase) forces a fresh fetch instead of
      * returning lyrics cached under a different source.
      */
     private static String key(TrackInfo track, String source) {
-        return track.cacheKey() + "|" + source;
+        // Retry YouTube Music lookups that failed when the request included account headers.
+        String revision = "YTMusic".equals(source) ? "|2" : "";
+        return track.cacheKey() + "|" + source + revision;
     }
 
     private static String trackKey(TrackInfo track) {
@@ -729,13 +894,41 @@ public final class LyricsCache {
 
             String content = String.join("\n",
                     lines.subList(header.contentStart(), lines.size()));
-            return parseContentLines(content, header.synced(), header.provider(),
-                    header.songwriters(), header.sourceUrl(), header.formatType(), readRaw(file),
+            Lyrics lyrics = parseContentLines(content, header.synced(), header.provider(),
+                    header.songwriters(), header.credits(), header.sourceUrl(), header.formatType(), readRaw(file),
                     key, header.about());
+            if (lyrics != null && isCorruptedPetitLyrics(header.provider(), lyrics)) {
+                discard(file);
+                return null;
+            }
+            return lyrics;
         } catch (Exception ex) {
             Logger.printDebug(() -> "Could not read lyrics from disk cache", ex);
             return null;
         }
+    }
+
+    private static boolean isCorruptedPetitLyrics(@Nullable String provider, Lyrics lyrics) {
+        if (provider == null || (!provider.equalsIgnoreCase("PetitLyrics") && !provider.toLowerCase(Locale.ROOT).contains("petitlyrics"))) {
+            return false;
+        }
+        int singleLetterTokens = 0;
+        int totalTokens = 0;
+        for (LyricsLine line : lyrics.lines()) {
+            if (line.words() != null && !line.words().isEmpty()) {
+                for (Word w : line.words()) {
+                    String wt = w.text();
+                    if (wt != null && !wt.isEmpty()) {
+                        totalTokens++;
+                        if (wt.length() == 1 && Character.isLetter(wt.charAt(0))
+                                && !ScriptDetector.containsUnspaced(wt)) {
+                            singleLetterTokens++;
+                        }
+                    }
+                }
+            }
+        }
+        return totalTokens >= 8 && ((float) singleLetterTokens / totalTokens) > 0.35f;
     }
 
     @Nullable
@@ -745,15 +938,8 @@ public final class LyricsCache {
         String content = String.join("\n",
                 lines.subList(header.contentStart(), lines.size()));
         return parseContentLines(content, header.synced(), header.provider(),
-                header.songwriters(), header.sourceUrl(), header.formatType(), readRaw(file),
+                header.songwriters(), header.credits(), header.sourceUrl(), header.formatType(), readRaw(file),
                 sidecarKey, header.about());
-    }
-
-    /** The header lines of a cached lyrics file and the index its content starts at. */
-    private record Header(boolean notFound, String provider, boolean synced,
-                          @Nullable String sourceUrl, @Nullable String formatType,
-                          @Nullable List<String> songwriters, @Nullable String about,
-                          @Nullable String videoId, int contentStart) {
     }
 
     private static Header parseHeaders(List<String> lines, int from) {
@@ -762,6 +948,7 @@ public final class LyricsCache {
         String sourceUrl = null;
         String formatType = null;
         List<String> songwriters = null;
+        List<String> credits = null;
         String about = null;
         String videoId = null;
         int contentStart = from;
@@ -784,19 +971,10 @@ public final class LyricsCache {
                 sourceUrl = emptyToNull(line.substring(HEADER_SOURCE_URL.length()));
             } else if (line.startsWith(HEADER_FORMAT_TYPE)) {
                 formatType = emptyToNull(line.substring(HEADER_FORMAT_TYPE.length()));
-            } else if (line.startsWith(HEADER_SONGWRITERS)) {
-                String value = line.substring(HEADER_SONGWRITERS.length());
-                if (!value.isEmpty()) {
-                    songwriters = new ArrayList<>();
-                    for (String s : value.split("␟")) {
-                        if (!s.isEmpty()) {
-                            songwriters.add(s);
-                        }
-                    }
-                    if (songwriters.isEmpty()) {
-                        songwriters = null;
-                    }
-                }
+            } else if (line.startsWith(HEADER_WRITERS)) {
+                songwriters = parseListHeader(line.substring(HEADER_WRITERS.length()));
+            } else if (line.startsWith(HEADER_CREDITS)) {
+                credits = parseListHeader(line.substring(HEADER_CREDITS.length()));
             } else if (line.startsWith(HEADER_ABOUT)) {
                 String value = line.substring(HEADER_ABOUT.length());
                 if (!value.isEmpty()) {
@@ -808,13 +986,25 @@ public final class LyricsCache {
             }
             contentStart = i + 1;
         }
-        return new Header(notFound, provider, synced, sourceUrl, formatType, songwriters, about,
-                videoId, contentStart);
+        return new Header(notFound, provider, synced, sourceUrl, formatType, songwriters, credits,
+                about, videoId, contentStart);
+    }
+
+    @Nullable
+    private static List<String> parseListHeader(String value) {
+        List<String> entries = new ArrayList<>();
+        for (String entry : value.split("␟")) {
+            if (!entry.isEmpty()) {
+                entries.add(entry);
+            }
+        }
+        return entries.isEmpty() ? null : entries;
     }
 
     @Nullable
     private static Lyrics parseContentLines(String content, boolean synced, String provider,
                                             @Nullable List<String> songwriters,
+                                            @Nullable List<String> credits,
                                             @Nullable String sourceUrl,
                                             @Nullable String formatType,
                                             @Nullable String rawFormat, String key,
@@ -824,7 +1014,7 @@ public final class LyricsCache {
         if (TTML_FORMAT_TYPE.equals(formatType) && rawFormat != null && !rawFormat.isEmpty()) {
             final Lyrics reread = TTMLParser.ttmlToLyrics(rawFormat, provider, sourceUrl);
             if (reread != null && !reread.isEmpty()) {
-                return withAbout(reread, about);
+                return withStoredInfo(reread, credits, about);
             }
         }
 
@@ -837,18 +1027,23 @@ public final class LyricsCache {
         return new Lyrics(parsed, provider, synced,
                 alignedSidecar(readEmbeddedRomanization(key), parsed.size()),
                 alignedSidecarMap(readEmbeddedTranslations(key), parsed.size()),
-                null, songwriters, rawFormat, formatType, sourceUrl, about);
+                null, songwriters, credits, rawFormat, formatType, sourceUrl, about, null);
     }
 
-    /** The description was never in the file, so it is carried over rather than dropped. */
-    private static Lyrics withAbout(Lyrics lyrics, @Nullable String about) {
-        if (about == null || about.equals(lyrics.about())) {
+    /**
+     * The description was never in the file, and neither are the credits a provider added to the
+     * ones in the file, so they are carried over rather than dropped.
+     */
+    private static Lyrics withStoredInfo(Lyrics lyrics, @Nullable List<String> credits,
+                                         @Nullable String about) {
+        if (about == null && credits == null) {
             return lyrics;
         }
         return new Lyrics(lyrics.lines(), lyrics.providerName(), lyrics.synced(),
                 lyrics.romanization(), lyrics.translations(), lyrics.romanizations(),
-                lyrics.songwriters(), lyrics.rawFormat(), lyrics.formatType(),
-                lyrics.sourceUrl(), about);
+                lyrics.songwriters(), credits != null ? credits : lyrics.credits(),
+                lyrics.rawFormat(), lyrics.formatType(), lyrics.sourceUrl(),
+                about != null ? about : lyrics.about(), lyrics.agentNames());
     }
 
     /**
@@ -952,12 +1147,10 @@ public final class LyricsCache {
     }
 
     /**
-     * Deletes the oldest files once the cache grows past {@link #DISK_ENTRIES}.
-     * <p>
-     * Providers are queried in parallel and each result is cached, so trims can overlap. A sort
-     * needs keys that hold still, and a file written or deleted meanwhile changes its modification
-     * time, so each time is read once before sorting. Trims also run one at a time, so two of them
-     * never delete the files the other is ordering.
+     * Deletes the oldest files once the cache grows past {@link #DISK_ENTRIES}. Providers are
+     * queried in parallel, so trims can overlap: a sort needs keys that hold still, and a file
+     * written or deleted meanwhile changes its modification time, so each time is read once
+     * before sorting. Trims run one at a time, so two never delete the files the other is ordering.
      */
     private static synchronized void noteCacheWrite() {
         if (++writesSinceTrim < TRIM_EVERY_WRITES) {
@@ -1055,31 +1248,265 @@ public final class LyricsCache {
                 : "VID|" + videoId + "|PREF";
     }
 
+    public enum CacheBucket {
+        LYRICS,
+        TRANSLATION,
+        TRANSLITERATION,
+        AI_SECTION,
+        OFFSET,
+        ALL
+    }
+
+    public record BucketStats(long bytes, int items) {
+    }
+
+    public record CacheStats(BucketStats lyrics, BucketStats translation,
+                             BucketStats transliteration, BucketStats aiSection,
+                             BucketStats offset) {
+        public BucketStats total() {
+            return new BucketStats(
+                    lyrics.bytes() + translation.bytes() + transliteration.bytes()
+                            + aiSection.bytes() + offset.bytes(),
+                    lyrics.items() + translation.items() + transliteration.items()
+                            + aiSection.items() + offset.items());
+        }
+
+        public BucketStats forBucket(CacheBucket bucket) {
+            return switch (bucket) {
+                case LYRICS -> lyrics;
+                case TRANSLATION -> translation;
+                case TRANSLITERATION -> transliteration;
+                case AI_SECTION -> aiSection;
+                case OFFSET -> offset;
+                case ALL -> total();
+            };
+        }
+    }
+
     /**
-     * Empties the stored lyrics.
-     *
-     * <p>The dictionaries sit beside them and cost tens of megabytes and a download apiece to have
-     * back, so they are left alone. A track asked for afterwards fetches as it did the first time.
+     * Empties all stored lyrics and derived caches while keeping downloaded dictionaries intact.
      *
      * @return how many bytes were freed.
      */
     public static long clear() {
+        return clear(CacheBucket.ALL);
+    }
+
+    /** Empties one cache bucket (or {@link CacheBucket#ALL}) and returns how many bytes were freed. */
+    public static long clear(CacheBucket bucket) {
+        if (bucket == CacheBucket.OFFSET || bucket == CacheBucket.ALL) {
+            TrackOffsetStore.clear();
+        }
+        if (bucket == CacheBucket.OFFSET) {
+            return 0;
+        }
         long freed = 0;
         final File directory = offlineDirectory();
         final File[] files = directory == null ? null : directory.listFiles();
         if (files != null) {
             for (File file : files) {
-                freed += file.isDirectory() ? 0 : file.length();
-                //noinspection ResultOfMethodCallIgnored
-                file.delete();
+                if (file.isDirectory()) {
+                    continue;
+                }
+                if (shouldDeleteForBucket(file, bucket)) {
+                    long len = file.length();
+                    Utils.deleteQuietly(file);
+                    if (!file.exists()) {
+                        freed += len;
+                    }
+                }
             }
         }
         memoryCache.clear();
+        if (bucket == CacheBucket.LYRICS || bucket == CacheBucket.ALL) {
+            videoIdByKey.clear();
+        }
         return freed;
+    }
+
+    private static boolean shouldDeleteForBucket(File file, CacheBucket bucket) {
+        final String name = file.getName();
+        if (bucket == CacheBucket.ALL || classifyFile(name) == bucket) {
+            return true;
+        }
+        if (bucket == CacheBucket.LYRICS) {
+            return name.endsWith(".rombed.txt")
+                    || (name.contains(".trans.") && name.endsWith(".txt"))
+                    || name.endsWith(RAW_SUFFIX);
+        }
+        if (bucket == CacheBucket.TRANSLATION) {
+            return isTtmlOrOrphanRaw(file);
+        }
+        return false;
+    }
+
+    private static boolean isTtmlOrOrphanRaw(File rawFile) {
+        final String name = rawFile.getName();
+        if (!name.endsWith(RAW_SUFFIX)) {
+            return false;
+        }
+        final File parent = rawFile.getParentFile();
+        if (parent == null) {
+            return false;
+        }
+        final File companion = new File(parent, name.substring(0, name.length() - RAW_SUFFIX.length()));
+        if (!companion.isFile()) {
+            return true;
+        }
+        try (BufferedReader reader = Files.newBufferedReader(companion.toPath(), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith(HEADER_FORMAT_TYPE)) {
+                    return TTML_FORMAT_TYPE.equals(line.substring(HEADER_FORMAT_TYPE.length()));
+                }
+                if (!line.startsWith("#")) {
+                    return false;
+                }
+            }
+            return false;
+        } catch (IOException ex) {
+            return false;
+        }
+    }
+
+    /** How many bytes the stored lyrics occupy, measured the same way {@link #clear()} frees. */
+    public static long size() {
+        return stats().total().bytes();
+    }
+
+    /** Computes per-bucket byte sizes and item counts for the offline lyrics cache directory. */
+    public static CacheStats stats() {
+        long lyricsBytes = 0;
+        int lyricsItems = 0;
+        long translationBytes = 0;
+        int translationItems = 0;
+        long transliterationBytes = 0;
+        int transliterationItems = 0;
+        long aiSectionBytes = 0;
+        int aiSectionItems = 0;
+        final Set<String> seenPrefKeys = new HashSet<>();
+
+        final File directory = offlineDirectory();
+        final File[] files = directory == null ? null : directory.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    continue;
+                }
+                final String name = file.getName();
+                final long len = file.length();
+                switch (classifyFile(name)) {
+                    case LYRICS -> {
+                        lyricsBytes += len;
+                        if (name.endsWith(".lrc")) {
+                            if (!isNotFoundFile(file)) {
+                                lyricsItems++;
+                            }
+                        } else if (name.endsWith(".pref")) {
+                            String prefDedupKey = readPrefDedupKey(file);
+                            if (prefDedupKey != null
+                                    && (prefDedupKey.isEmpty() || seenPrefKeys.add(prefDedupKey))) {
+                                lyricsItems++;
+                            }
+                        }
+                    }
+                    case TRANSLATION -> {
+                        translationBytes += len;
+                        translationItems++;
+                    }
+                    case TRANSLITERATION -> {
+                        transliterationBytes += len;
+                        transliterationItems++;
+                    }
+                    case AI_SECTION -> {
+                        aiSectionBytes += len;
+                        aiSectionItems++;
+                    }
+                    default -> {
+                    }
+                }
+            }
+        }
+        return new CacheStats(
+                new BucketStats(lyricsBytes, lyricsItems),
+                new BucketStats(translationBytes, translationItems),
+                new BucketStats(transliterationBytes, transliterationItems),
+                new BucketStats(aiSectionBytes, aiSectionItems),
+                // Offsets live in preferences, so they take no space of their own here.
+                new BucketStats(0, TrackOffsetStore.count()));
+    }
+
+    private static boolean isNotFoundFile(File file) {
+        try (BufferedReader reader = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (NOT_FOUND_MARKER.equals(line)) {
+                    return true;
+                }
+                if (!line.startsWith("#")) {
+                    return false;
+                }
+            }
+            return false;
+        } catch (IOException ex) {
+            return false;
+        }
+    }
+
+    @Nullable
+    private static String readPrefDedupKey(File file) {
+        try (BufferedReader reader = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8)) {
+            String track = null;
+            String videoId = null;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (NOT_FOUND_MARKER.equals(line)) {
+                    return null;
+                }
+                if (line.startsWith(HEADER_TRACK)) {
+                    track = emptyToNull(line.substring(HEADER_TRACK.length()));
+                } else if (line.startsWith(HEADER_VIDEO_ID)) {
+                    videoId = emptyToNull(line.substring(HEADER_VIDEO_ID.length()));
+                } else if (!line.startsWith("#")) {
+                    break;
+                }
+            }
+            if (track == null) {
+                return "";
+            }
+            return videoId != null ? track + '\0' + videoId : track;
+        } catch (IOException ex) {
+            return null;
+        }
+    }
+
+    static CacheBucket classifyFile(String name) {
+        if (name.endsWith(".rombed.txt")
+                || name.endsWith(".rom.txt")
+                || name.endsWith(".wrom.txt")
+                || name.contains(".rom.")
+                || name.contains(".wrom.")
+                || name.contains(".ruby.")) {
+            return CacheBucket.TRANSLITERATION;
+        }
+        if (name.endsWith(".sec.txt")) {
+            return CacheBucket.AI_SECTION;
+        }
+        if (name.contains(".trans.") || name.endsWith(".txt")) {
+            return CacheBucket.TRANSLATION;
+        }
+        return CacheBucket.LYRICS;
     }
 
     @Nullable
     private static File offlineDirectory() {
         return LyricsDirectories.directory(LyricsDirectories.OFFLINE);
+    }
+
+    /** The header lines of a cached lyrics file and the index its content starts at. */
+    private record Header(boolean notFound, String provider, boolean synced,
+                          @Nullable String sourceUrl, @Nullable String formatType,
+                          @Nullable List<String> songwriters, @Nullable List<String> credits,
+                          @Nullable String about, @Nullable String videoId, int contentStart) {
     }
 }

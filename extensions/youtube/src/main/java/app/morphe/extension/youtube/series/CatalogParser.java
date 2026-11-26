@@ -19,6 +19,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+import app.morphe.extension.youtube.patches.VideoInformation;
+
 /** Explicit playlist containers only: recommendations and other shelves are never traversed. */
 public final class CatalogParser {
     public static final class Page {
@@ -142,6 +144,7 @@ public final class CatalogParser {
             }
     }
 
+    @SuppressWarnings("StatementWithEmptyBody")
     private void items(JSONArray items) throws JSONException {
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.optJSONObject(i);
@@ -149,7 +152,7 @@ public final class CatalogParser {
             JSONObject video = item.optJSONObject("playlistVideoRenderer");
             if (video != null) {
                 String id = video.optString("videoId");
-                if (!id.matches("[A-Za-z0-9_-]{11}")) id = "";
+                if (!VideoInformation.isVideoId(id)) id = "";
                 String title = text(video.optJSONObject("title"));
                 // Keep absent titles empty; the UI selects a fallback in the current locale.
                 long duration = video.optLong("lengthSeconds") * 1000;
@@ -210,13 +213,10 @@ public final class CatalogParser {
         StringBuilder result = new StringBuilder();
         JSONArray runs = text.optJSONArray("runs");
         if (runs != null)
-            for (int i = 0; i < runs.length(); i++)
-                result.append(objectAt(runs, i).optString("text"));
+            for (int i = 0; i < runs.length(); i++) {
+                JSONObject run = runs.optJSONObject(i);
+                result.append(run == null ? "" : run.optString("text"));
+            }
         return result.toString();
-    }
-
-    private static JSONObject objectAt(JSONArray array, int index) {
-        JSONObject v = array.optJSONObject(index);
-        return v == null ? new JSONObject() : v;
     }
 }

@@ -32,6 +32,7 @@ import app.morphe.extension.youtube.patches.VideoInformation;
 /**
  * Shows and edits the channels of a {@link WhitelistType}.
  */
+@SuppressWarnings("unused")
 public final class ChannelWhitelistDialog {
 
     private static final float LABEL_ALPHA = 0.7f;
@@ -123,7 +124,7 @@ public final class ChannelWhitelistDialog {
                     false,
                     () -> {
                         ChannelWhitelist.removeChannel(type, channelId);
-                        Utils.showToastShort(str("morphe_channel_whitelist_channel_removed"));
+                        Utils.showSnackbarShort(str("morphe_channel_whitelist_channel_removed"));
                         buildContent(context, type, container);
                     }
             ));

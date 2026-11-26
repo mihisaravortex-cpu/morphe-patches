@@ -16,8 +16,10 @@ import java.net.HttpURLConnection;
 import java.util.concurrent.atomic.AtomicLong;
 
 import app.morphe.extension.music.patches.lyrics.model.Lyrics;
+import app.morphe.extension.music.patches.lyrics.model.MetadataCleaner;
 import app.morphe.extension.music.patches.lyrics.model.TrackInfo;
 import app.morphe.extension.music.patches.lyrics.parsers.TTMLParser;
+import app.morphe.extension.music.settings.Settings;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.requests.Requester;
 
@@ -25,13 +27,45 @@ public final class AMLLProvider implements LyricsProvider {
 
     private static final String BASE_URL = "https://api.amll.dev/v1/lyrics";
 
+    private static String baseUrl() {
+        return LyricsEndpoints.base(BASE_URL, Settings.AMLL_ENDPOINT.get());
+    }
+
     private static final long REQUEST_THROTTLE_MS = 500;
 
     private static final AtomicLong lastRequestTime = new AtomicLong(0);
 
+    @Nullable
+    private static String sourceUrl(JSONObject getData, JSONObject best) {
+        String file = firstPath(getData);
+        if (file == null) {
+            file = firstPath(best);
+        }
+        if (file == null || file.isEmpty()) {
+            return null;
+        }
+        return "https://amlldb.bikonoo.com/view-lyric.html?file=" + file;
+    }
+
+    @Nullable
+    private static String firstPath(JSONObject object) {
+        for (String key : new String[]{"path", "file", "filename", "filePath"}) {
+            final String value = LyricsRequests.optString(object, key);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
     @Override
     public String name() {
         return "AMLL";
+    }
+
+    @Override
+    public boolean hasCandidates() {
+        return true;
     }
 
     @Nullable
@@ -41,7 +75,17 @@ public final class AMLLProvider implements LyricsProvider {
             return null;
         }
 
-        final JSONObject best = searchBest(track.title(), track.artist(), track.album());
+        String title = track.title().trim();
+        String cleanArtist = MetadataCleaner.cleanArtist(track.artist());
+        String artist = cleanArtist.isEmpty() ? track.artist().trim() : cleanArtist;
+
+        JSONObject best = searchBest(title, artist, track.album());
+        if (best == null && track.album() != null && !track.album().isEmpty()) {
+            best = searchBest(title, artist, null);
+        }
+        if (best == null && !artist.equalsIgnoreCase(track.artist().trim())) {
+            best = searchBest(title, track.artist().trim(), null);
+        }
         if (best == null) {
             return null;
         }
@@ -54,7 +98,7 @@ public final class AMLLProvider implements LyricsProvider {
         try {
             LyricsRequests.throttle(lastRequestTime, REQUEST_THROTTLE_MS);
             getConnection = LyricsRequests.openConnection(
-                    BASE_URL + "/get?id=" + lyricId + "&format=ttml");
+                    baseUrl() + "/get?id=" + lyricId + "&format=ttml");
             if (getConnection.getResponseCode() != Requester.HTTP_STATUS_CODE_SUCCESS) {
                 LyricsRequests.logFailure(name(), getConnection);
                 return null;
@@ -81,35 +125,12 @@ public final class AMLLProvider implements LyricsProvider {
     }
 
     @Nullable
-    private static String sourceUrl(JSONObject getData, JSONObject best) {
-        String file = firstPath(getData);
-        if (file == null) {
-            file = firstPath(best);
-        }
-        if (file == null || file.isEmpty()) {
-            return null;
-        }
-        return "https://amlldb.bikonoo.com/view-lyric.html?file=" + file;
-    }
-
-    @Nullable
-    private static String firstPath(JSONObject object) {
-        for (String key : new String[]{"path", "file", "filename", "filePath"}) {
-            final String value = LyricsRequests.optString(object, key);
-            if (value != null) {
-                return value;
-            }
-        }
-        return null;
-    }
-
-    @Nullable
     private JSONObject searchBest(String title, String artist, String album) {
         HttpURLConnection searchConnection = null;
         try {
             String searchUrl = String.format(
                     "%s/search?musicName=%s&artistName=%s",
-                    BASE_URL,
+                    baseUrl(),
                     LyricsRequests.encode(title),
                     LyricsRequests.encode(artist)
             );

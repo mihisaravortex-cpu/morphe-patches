@@ -10,11 +10,11 @@ package app.morphe.extension.music.patches.lyrics.requests;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import app.morphe.extension.music.patches.lyrics.model.Lyrics;
-import app.morphe.extension.music.patches.lyrics.model.TrackInfo;
-
 import java.util.ArrayList;
 import java.util.List;
+
+import app.morphe.extension.music.patches.lyrics.model.Lyrics;
+import app.morphe.extension.music.patches.lyrics.model.TrackInfo;
 
 /**
  * A provider whose own search already ranks its results, so the top one answers the plain lookup
@@ -22,15 +22,7 @@ import java.util.List;
  */
 abstract class ScoredSongProvider implements LyricsProvider {
 
-    /**
-     * One hit of the provider's own search, with the metadata it came under. {@code durationSec}
-     * is 0 when the provider reports none, which leaves the duration filter to the other fields.
-     */
-    protected record ScoredSong(int score, Lyrics lyrics, String title, String artist,
-                                long durationSec) {
-    }
-
-    /** The hits for this track, best first, empty when the search found none. */
+    /** The hits for this track, the best first, empty when the search found none. */
     @NonNull
     protected abstract List<ScoredSong> fetchScoredSongs(TrackInfo track) throws Exception;
 
@@ -58,5 +50,13 @@ abstract class ScoredSongProvider implements LyricsProvider {
             scored.add(new Lyrics.ScoredLyrics(candidate.score(), candidate.lyrics()));
         }
         return scored;
+    }
+
+    /**
+     * One hit of the provider's own search, with the metadata it came under. {@code durationSec}
+     * is 0 when the provider reports none, which leaves the duration filter to the other fields.
+     */
+    protected record ScoredSong(int score, Lyrics lyrics, String title, String artist,
+                                long durationSec) {
     }
 }

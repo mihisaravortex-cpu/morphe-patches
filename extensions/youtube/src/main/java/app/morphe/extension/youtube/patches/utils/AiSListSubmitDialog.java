@@ -46,6 +46,7 @@ public final class AiSListSubmitDialog {
     private AiSListSubmitDialog() {
     }
 
+    @SuppressWarnings("SameReturnValue")
     public static boolean isPatchIncluded() {
         return false; // Modified during patching.
     }
@@ -76,16 +77,16 @@ public final class AiSListSubmitDialog {
             if (username.isEmpty()) {
                 // The name appears on the public submitter leaderboard, so it is never
                 // filled in silently and the user sets it in the settings instead.
-                Utils.showToastLong(str("morphe_aislist_submit_no_username"));
+                Utils.showSnackbarLong(str("morphe_aislist_submit_no_username"));
                 return;
             }
 
-            Utils.showToastShort(str("morphe_aislist_submit_resolving"));
+            Utils.showSnackbarShort(str("morphe_aislist_submit_resolving"));
 
             Utils.runOnBackgroundThread(() -> {
                 String handle = AiSListSubmitRequest.fetchChannelHandle(videoId);
                 if (handle == null) {
-                    Utils.showToastShort(str("morphe_aislist_submit_failed_channel"));
+                    Utils.showSnackbarShort(str("morphe_aislist_submit_failed_channel"));
                     return;
                 }
 
@@ -94,7 +95,7 @@ public final class AiSListSubmitDialog {
                 if (listedIn != null) {
                     // Each list names itself in a whole sentence, because a language that
                     // inflects the list name cannot build one from a substituted noun.
-                    Utils.showToastShort(str(listedIn == AiSListFilter.ListedIn.BLOCKLIST
+                    Utils.showSnackbarShort(str(listedIn == AiSListFilter.ListedIn.BLOCKLIST
                             ? "morphe_aislist_submit_already_blocklisted"
                             : "morphe_aislist_submit_already_warnlisted"));
                     return;
@@ -135,7 +136,7 @@ public final class AiSListSubmitDialog {
             String messageKey = AiSListSubmitRequest.submit(
                     handle, "https://youtu.be/" + videoId, username);
 
-            Utils.showToastShort(str(messageKey));
+            Utils.showSnackbarShort(str(messageKey));
         });
     }
 }

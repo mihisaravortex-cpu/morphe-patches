@@ -13,33 +13,33 @@ package app.morphe.patches.youtube.layout.formfactor
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patches.shared.misc.settings.preference.BasePreference
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.registersUsed
 import app.morphe.patches.shared.misc.settings.preference.ListPreference
+import app.morphe.patches.shared.misc.settings.preference.NonInteractivePreference
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.shared.misc.settings.preference.noTitleUnsortedPreferenceCategory
+import app.morphe.patches.youtube.misc.cardisplay.carDisplayPatch
 import app.morphe.patches.youtube.misc.contexthook.Endpoint
+import app.morphe.patches.youtube.misc.contexthook.addBrowseClientFormFactorHook
 import app.morphe.patches.youtube.misc.contexthook.addClientFormFactorHook
 import app.morphe.patches.youtube.misc.contexthook.clientContextHookPatch
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
 import app.morphe.patches.youtube.misc.fix.videoactionbar.restoreOldVideoActionBarPatch
 import app.morphe.patches.youtube.misc.navigation.navigationBarHookPatch
-import app.morphe.patches.youtube.misc.playservice.is_20_31_or_greater
-import app.morphe.patches.youtube.misc.playservice.versionCheckPatch
 import app.morphe.patches.youtube.misc.settings.PreferenceScreen
 import app.morphe.patches.youtube.misc.settings.settingsPatch
 import app.morphe.patches.youtube.shared.Constants.COMPATIBILITY_YOUTUBE
-import app.morphe.util.findFreeRegister
-import app.morphe.util.registersUsed
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/youtube/patches/ChangeFormFactorPatch;"
 
-@Suppress("unused")
-val changeFormFactorPatch = bytecodePatch(
+val changeFormFactorPatch = patch(
     name = "Change form factor",
-    description = "Adds an option to change the UI appearance to a phone, tablet, or automotive device.",
+    description = "Adds options to change the UI appearance to a phone, tablet, or automotive device, " +
+        "and to use the automotive layout and auto-hide the navigation bar on a car display.",
 ) {
     dependsOn(
         sharedExtensionPatch,
@@ -47,25 +47,27 @@ val changeFormFactorPatch = bytecodePatch(
         clientContextHookPatch,
         navigationBarHookPatch,
         restoreOldVideoActionBarPatch,
-        versionCheckPatch
+        carDisplayPatch,
     )
 
     compatibleWith(COMPATIBILITY_YOUTUBE)
 
     execute {
-        val preferences = mutableSetOf<BasePreference>(
-            ListPreference("morphe_change_form_factor")
-        )
-
-        if (is_20_31_or_greater) {
-            preferences += SwitchPreference("morphe_tablet_layout_in_player", summary = true)
-        }
-
         PreferenceScreen.GENERAL.addPreferences(
-            noTitleUnsortedPreferenceCategory(preferences)
+            noTitleUnsortedPreferenceCategory(
+                ListPreference("morphe_change_form_factor"),
+                SwitchPreference("morphe_change_form_factor_car_display"),
+                SwitchPreference("morphe_change_form_factor_car_display_hide_navigation_bar"),
+                NonInteractivePreference(
+                    key = "morphe_change_form_factor_car_display_hide_navigation_bar_delay",
+                    tag = "app.morphe.extension.shared.settings.preference.SeekBarPreference",
+                    selectable = true
+                ),
+                SwitchPreference("morphe_change_form_factor_car_display_any"),
+            )
         )
 
-        getInnerTubeClientConfigFingerprint().let {
+        InnerTubeClientConfigFingerprint.let {
             it.method.apply {
                 val index = it.instructionMatches.last().index
                 val register = getInstruction<TwoRegisterInstruction>(index).registerA
@@ -91,6 +93,18 @@ val changeFormFactorPatch = bytecodePatch(
                 "$EXTENSION_CLASS->replaceBrokenFormFactor(I)I",
             )
         }
+
+        addBrowseClientFormFactorHook(
+            "$EXTENSION_CLASS->replaceBrowseFormFactor(ILjava/lang/String;)I"
+        )
+
+        ResponsiveContainerPropertiesFingerprint.method.addInstructions(
+            0,
+            """
+                invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->getResponsiveContainerWidth(I)I
+                move-result p1
+            """
+        )
 
         RepeatedItemSectionRendererFingerprint.let {
             it.method.apply {

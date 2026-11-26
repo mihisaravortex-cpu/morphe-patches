@@ -9,6 +9,8 @@
 
 package app.morphe.extension.youtube.patches;
 
+import androidx.annotation.Nullable;
+
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -19,6 +21,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -45,7 +48,6 @@ public final class AutoTranslateCaptionsPatch {
     }
 
     private static final Pattern LANGUAGE_CODE_PATTERN = Pattern.compile("[a-z]{2,8}(-[A-Za-z0-9]{2,8})*");
-    private static final Pattern VIDEO_ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]{11}");
     private static final Pattern VSS_ID_SUFFIX_PATTERN = Pattern.compile("[A-Za-z0-9_-]{1,128}");
 
     /**
@@ -92,21 +94,27 @@ public final class AutoTranslateCaptionsPatch {
             return tracks;
         }
 
-        // Native translations can use different originals for different targets.
-        // Only clone them when their signed URL and original VSS agree.
+        // Keep YouTube's first translation as the template for missing targets. Other native
+        // targets may use another original, but every track must be valid and from the same video.
         CaptionTrackInterface template = tracks.get(0);
         String identity = translationSourceIdentity(template);
         if (identity == null) return tracks;
+        String video = Objects.requireNonNull(captionParameters(template.patch_getUrl())).get("v");
         for (CaptionTrackInterface track : tracks) {
-            if (!identity.equals(translationSourceIdentity(track))) return tracks;
+            String otherIdentity = translationSourceIdentity(track);
+            if (otherIdentity == null || !identity.equals(otherIdentity)
+                    && (video == null || !video.equals(Objects.requireNonNull(captionParameters(track.patch_getUrl())).get("v")))) {
+                return tracks;
+            }
         }
         String templateCode = template.patch_getLanguageCode();
         String templateUrl = template.patch_getUrl();
         int targetAt = targetValueOffset(templateUrl, templateCode);
-        String vssIdPrefix = removeSuffix(template.patch_getVssId(), templateCode.length());
+        String vssId = template.patch_getVssId();
+        String vssIdPrefix = vssId.substring(0, vssId.length() - templateCode.length());
         String urlPrefix = templateUrl.substring(0, targetAt);
         String urlSuffix = templateUrl.substring(targetAt + templateCode.length());
-        String sourceLanguage = captionParameters(templateUrl).get("lang");
+        String sourceLanguage = Objects.requireNonNull(captionParameters(templateUrl)).get("lang");
 
         Set<String> existingLanguages = new HashSet<>();
         for (CaptionTrackInterface track : tracks) {
@@ -118,7 +126,7 @@ public final class AutoTranslateCaptionsPatch {
             // Never ask YouTube to auto-translate a source into itself.
             if (getLanguageKey(code).equals(getLanguageKey(sourceLanguage))) continue;
             if (existingLanguages.add(getLanguageKey(code))) {
-                String name = Locale.forLanguageTag(code).getDisplayName(locale);
+                String name = translationLanguageName(code, locale);
                 result.add(template.patch_copyTranslation(
                         code, urlPrefix + code + urlSuffix, vssIdPrefix + code, name));
             }
@@ -138,10 +146,11 @@ public final class AutoTranslateCaptionsPatch {
 
     /** Keep YouTube's native menu construction and its other availability checks. */
     public static int getTranslationCount(int nativeCount,
-            List<? extends PreferredCaptionLanguagePatch.CaptionTrackInterface> directTracks) {
+            List<? extends PreferredCaptionLanguagePatch.CaptionTrackInterface> directTracks,
+            PreferredCaptionLanguagePatch.CaptionTrackInterface defaultSource) {
         try {
             return nativeCount > 0 || !Settings.AUTO_TRANSLATE_ADDITIONAL_LANGUAGES.get()
-                    || findFallbackSource(directTracks, null) == null ? nativeCount : 1;
+                    || findFallbackSource(directTracks, defaultSource) == null ? nativeCount : 1;
         } catch (Exception ex) {
             Logger.printException(() -> "getTranslationCount failure", ex);
             return nativeCount;
@@ -176,8 +185,8 @@ public final class AutoTranslateCaptionsPatch {
     }
 
     /**
-     * Prefer the source YouTube uses for translations (or its default caption track)
-     * within this audio's originals, otherwise retain their order.
+     * Prefer the original track YouTube uses for translations (or its default
+     * caption track) when available; otherwise, preserve the original order.
      */
     static CaptionTrackInterface findFallbackSource(
             List<? extends PreferredCaptionLanguagePatch.CaptionTrackInterface> tracks,
@@ -205,7 +214,31 @@ public final class AutoTranslateCaptionsPatch {
         return preferred != null ? preferred : mixedSources ? null : first;
     }
 
-    static String translationLanguage(String language) {
+    /**
+     * @return Translation languages. If the selected language is an alias of a language
+     *         then the alias is used instead, so the selection is kept.
+     */
+    public static String[] translationLanguages(String selected) {
+        String[] codes = TRANSLATION_LANGUAGES.clone();
+        String canonical = translationLanguage(selected);
+        for (int i = 0; i < codes.length; i++) {
+            if (codes[i].equals(canonical)) {
+                codes[i] = selected;
+                break;
+            }
+        }
+        return codes;
+    }
+
+    public static String translationLanguageName(String language, Locale locale) {
+        String code = translationLanguage(language);
+        if (code == null) code = language;
+        // YouTube's generic pt target is Brazilian Portuguese.
+        return Locale.forLanguageTag("pt".equals(code) ? "pt-BR" : code).getDisplayName(locale);
+    }
+
+    @Nullable
+    static String translationLanguage(@Nullable String language) {
         if (language == null || !LANGUAGE_CODE_PATTERN.matcher(language).matches()) return null;
         for (String code : TRANSLATION_LANGUAGES) {
             if (code.equalsIgnoreCase(language)) return code;
@@ -223,14 +256,37 @@ public final class AutoTranslateCaptionsPatch {
         String url = source.patch_getUrl();
         int fragment = url.indexOf('#');
         if (fragment < 0) fragment = url.length();
-        String name = Locale.forLanguageTag(language).getDisplayName(locale);
+        String name = translationLanguageName(language, locale);
         return source.patch_copyTranslation(language,
                 url.substring(0, fragment) + "&tlang=" + language + url.substring(fragment),
                 "t" + source.patch_getVssId() + "." + language, name.isEmpty() ? language : name);
     }
 
+    /** ASR processing shares the same canonical URL validation as native translation tracks. */
+    static boolean isAutomaticCaption(String vss, String url) {
+        if (vss == null) return false;
+        boolean translated = vss.startsWith("ta.");
+        if (!translated && !vss.matches("a\\.[A-Za-z0-9_-]+")) return false;
+        Map<String, String> fields = captionParameters(url);
+        if (fields == null || !"asr".equals(fields.get("kind"))) return false;
+        String target = fields.get("tlang");
+        return translated
+                ? target != null && LANGUAGE_CODE_PATTERN.matcher(target).matches()
+                        && vss.endsWith("." + target)
+                : !fields.containsKey("tlang");
+    }
+
+    /**
+     * @return If the track is a translation of another track, according to its validated url.
+     */
+    static boolean isTranslationTrack(CaptionTrackInterface track) {
+        Map<String, String> parameters = captionParameters(track.patch_getUrl());
+        return parameters != null && parameters.containsKey("tlang");
+    }
+
     /** Keep YouTube URL validation shared by original and native translated tracks. */
-    private static Map<String, String> captionParameters(String url) {
+    @Nullable
+    static Map<String, String> captionParameters(@Nullable String url) {
         if (url == null) return null;
         try {
             URI uri = URI.create(url);
@@ -244,13 +300,16 @@ public final class AutoTranslateCaptionsPatch {
             for (String part : uri.getRawQuery().split("&", -1)) {
                 int split = part.indexOf('=');
                 String rawKey = split < 0 ? part : part.substring(0, split);
+                //noinspection CharsetObjectCanBeUsed
                 String key = URLDecoder.decode(rawKey, "UTF-8");
                 if (!List.of("v", "lang", "kind", "name", "tlang").contains(key)) continue;
                 if (!key.equals(rawKey) || fields.containsKey(key)) return null;
+                //noinspection CharsetObjectCanBeUsed
                 fields.put(key, URLDecoder.decode(split < 0 ? "" : part.substring(split + 1), "UTF-8"));
             }
             return fields;
-        } catch (IllegalArgumentException | UnsupportedEncodingException ignored) {
+        } catch (IllegalArgumentException | UnsupportedEncodingException ex) {
+            Logger.printDebug(() -> "Invalid caption url", ex);
             return null;
         }
     }
@@ -290,12 +349,14 @@ public final class AutoTranslateCaptionsPatch {
             int equal = parameter.indexOf('=');
             String rawKey = equal < 0 ? parameter : parameter.substring(0, equal);
             try {
+                //noinspection CharsetObjectCanBeUsed
                 if ("tlang".equals(URLDecoder.decode(rawKey, "UTF-8"))) {
                     if (found >= 0 || !rawKey.equals("tlang")
                             || !parameter.equals("tlang=" + language)) return -1;
                     found = offset + "tlang=".length();
                 }
-            } catch (IllegalArgumentException | UnsupportedEncodingException ignored) {
+            } catch (IllegalArgumentException | UnsupportedEncodingException ex) {
+                Logger.printDebug(() -> "Invalid caption url parameter", ex);
                 return -1;
             }
             offset = next + 1;
@@ -315,7 +376,7 @@ public final class AutoTranslateCaptionsPatch {
         if (parameters == null || parameters.containsKey("tlang")) return null;
         String video = parameters.get("v"), sourceLanguage = parameters.get("lang");
         String kind = parameters.get("kind");
-        return video != null && VIDEO_ID_PATTERN.matcher(video).matches()
+        return VideoInformation.isVideoId(video)
                 && sourceLanguage != null && LANGUAGE_CODE_PATTERN.matcher(sourceLanguage).matches()
                 && getLanguageKey(language).equals(getLanguageKey(sourceLanguage))
                 && (asr ? "asr".equals(kind) : kind == null || kind.isEmpty())
@@ -327,23 +388,30 @@ public final class AutoTranslateCaptionsPatch {
                 && VSS_ID_SUFFIX_PATTERN.matcher(value.substring(prefix.length() + 1)).matches());
     }
 
-    private static String removeSuffix(String value, int suffixLength) {
-        return value.substring(0, value.length() - suffixLength);
+    /** Canonical aliases while retaining the region/script for exact track selection. */
+    static String normalizeLanguageCode(String languageCode) {
+        if (languageCode == null) return "";
+        String code = languageCode.trim().replace('_', '-').toLowerCase(Locale.ROOT);
+        int dash = code.indexOf('-');
+        String primary = dash < 0 ? code : code.substring(0, dash);
+        String canonical = switch (primary) {
+            case "iw" -> "he";
+            case "in" -> "id";
+            case "ji" -> "yi";
+            case "tl" -> "fil";
+            case "nb" -> "no";
+            default -> primary;
+        };
+        return canonical + code.substring(primary.length());
     }
 
     /**
      * @return Key that is the same for all codes of a language.
      */
-    private static String getLanguageKey(String languageCode) {
-        String code = languageCode.replace('_', '-').toLowerCase(Locale.ROOT);
+    static String getLanguageKey(String languageCode) {
+        String code = normalizeLanguageCode(languageCode);
         String primary = code.split("-")[0];
         switch (primary) {
-            // Legacy ISO 639 codes used by Java Locale and YouTube.
-            case "iw": return "he";
-            case "in": return "id";
-            case "ji": return "yi";
-            case "tl": return "fil";
-            case "nb": return "no";
             // Traditional and Simplified Chinese are different translations.
             case "zh":
                 // Script takes priority over region.

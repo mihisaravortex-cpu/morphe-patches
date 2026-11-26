@@ -13,11 +13,19 @@ package app.morphe.extension.youtube.patches.components;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewStub;
+import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.facebook.litho.ComponentHost;
+import com.facebook.litho.TextContent;
 import com.google.android.libraries.youtube.rendering.ui.pivotbar.PivotBar;
+import com.google.protobuf.MessageLite;
 
 import java.lang.ref.WeakReference;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -33,31 +41,48 @@ import app.morphe.extension.shared.patches.components.ContextInterface;
 import app.morphe.extension.shared.patches.components.Filter;
 import app.morphe.extension.shared.patches.components.StringFilterGroup;
 import app.morphe.extension.shared.patches.components.StringFilterGroupList;
-import app.morphe.extension.shared.settings.BaseSettings;
 import app.morphe.extension.shared.settings.BooleanSetting;
+import app.morphe.extension.shared.innertube.GuideResponseOuterClass.NavigationEndpoint;
+import app.morphe.extension.shared.innertube.PushNotification.PushNotificationSupportedRenderers;
 import app.morphe.extension.youtube.patches.LayoutReloadObserverPatch;
+import app.morphe.extension.youtube.patches.utils.ProtoNode;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.EngagementPanel;
 import app.morphe.extension.youtube.shared.NavigationBar;
 import app.morphe.extension.youtube.shared.PlayerType;
 import app.morphe.extension.youtube.shared.ShortsPlayerState;
-import kotlin.Unit;
 
-@SuppressWarnings({"unused", "FieldCanBeLocal"})
+@SuppressWarnings("unused")
 public final class ShortsFilter extends Filter {
-    private static final String COMPONENT_TYPE = "ComponentType";
     private static final boolean HIDE_SHORTS_NAVIGATION_BAR = Settings.HIDE_SHORTS_NAVIGATION_BAR.get();
-    private final String REEL_CHANNEL_BAR_PATH = "reel_channel_bar.e";
+    /**
+     * Videos of the modern home feed layout. The Shorts tab of a channel uses the same element.
+     */
+    private static final String MODERN_FEED_LOCKUP_PATH = "lockup.e";
+    /**
+     * Videos of the feed and the search that can be Shorts.
+     */
+    private static final String[] SHORTS_COMPACT_FEED_VIDEO_PATHS = {
+            // Shorts that appear in the feed/search when the device is using tablet layout.
+            "compact_video.e",
+            // 'video_lockup_with_attachment.e' is shown instead of 'compact_video.e' for some users
+            "video_lockup_with_attachment.e",
+            // Search results that appear in a horizontal shelf.
+            "video_card.e",
+            // Videos of the modern home feed layout.
+            MODERN_FEED_LOCKUP_PATH
+    };
+    private static final String REEL_CHANNEL_BAR_PATH = "reel_channel_bar.e";
 
     /**
      * For paid promotion label and subscribe button that appears in the channel bar.
      */
-    private final String REEL_METAPANEL_PATH = "reel_metapanel.e";
+    private static final String REEL_METAPANEL_PATH = "reel_metapanel.e";
 
     /**
      * For paid promotion label and subscribe button that appears in the channel bar.
      */
-    private final String REEL_PLAYER_OVERLAY_PATH = "reel_player_overlay.e";
+    private static final String REEL_PLAYER_OVERLAY_PATH = "reel_player_overlay.e";
 
     /**
      * Tags that appears when opening the Shorts player.
@@ -160,12 +185,7 @@ public final class ShortsFilter extends Filter {
 
         shortsCompactFeedVideo = new StringFilterGroup(
                 null,
-                // Shorts that appear in the feed/search when the device is using tablet layout.
-                "compact_video.e",
-                // 'video_lockup_with_attachment.e' is shown instead of 'compact_video.e' for some users
-                "video_lockup_with_attachment.e",
-                // Search results that appear in a horizontal shelf.
-                "video_card.e");
+                SHORTS_COMPACT_FEED_VIDEO_PATHS);
 
         // Filter out items that use the 'frame0' thumbnail and other Shorts specific images.
         // 'frame0' is a valid thumbnail for both regular videos and Shorts,
@@ -461,6 +481,114 @@ public final class ShortsFilter extends Filter {
         return true;
     }
 
+    /**
+     * Injection point.
+     * <p>
+     * The container of the bar below a Short keeps its height when the bar is hidden,
+     * such as the comment bar hidden by "Hide preview comment", so the Short is shown above an empty bar.
+     * The container is hidden while it shows nothing.
+     */
+    public static void hideEmptyBottomActionBar(View container) {
+        try {
+            if (!Settings.HIDE_SHORTS_PREVIEW_COMMENT.get() || container == null) {
+                return;
+            }
+            ViewTreeObserver.OnPreDrawListener listener = () -> {
+                try {
+                    if (container.getVisibility() != View.VISIBLE) {
+                        return true;
+                    }
+                    // A text or a view other than an empty Litho host, such as the bar of another feature.
+                    // A Litho host without children or texts is what is left of a hidden bar.
+                    ArrayDeque<View> views = new ArrayDeque<>();
+                    views.add(container);
+                    while (!views.isEmpty()) {
+                        View view = views.remove();
+                        if (view.getVisibility() != View.VISIBLE) {
+                            continue;
+                        }
+                        if (view instanceof ComponentHost host) {
+                            TextContent textContent = host.getTextContent();
+                            if (textContent != null && !textContent.getTextItems().isEmpty()) {
+                                return true;
+                            }
+                        } else if (!(view instanceof ViewGroup)) {
+                            return true;
+                        }
+                        ViewGroup group = (ViewGroup) view;
+                        for (int i = 0, count = group.getChildCount(); i < count; i++) {
+                            views.add(group.getChildAt(i));
+                        }
+                    }
+                    container.setVisibility(View.GONE);
+                    // Not drawn with the empty bar.
+                    return false;
+                } catch (Exception ex) {
+                    Logger.printException(() -> "Bottom action bar check failure", ex);
+                }
+                return true;
+            };
+            container.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override
+                public void onViewAttachedToWindow(@NonNull View view) {
+                    view.getViewTreeObserver().addOnPreDrawListener(listener);
+                }
+
+                @Override
+                public void onViewDetachedFromWindow(@NonNull View view) {
+                    view.getViewTreeObserver().removeOnPreDrawListener(listener);
+                }
+            });
+            if (container.isAttachedToWindow()) {
+                container.getViewTreeObserver().addOnPreDrawListener(listener);
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "hideEmptyBottomActionBar failure", ex);
+        }
+    }
+
+    /**
+     * If the Short whose page is created shows the bar below it, such as the comment bar.
+     */
+    private static volatile boolean shortShowsBottomActionBar;
+
+    /**
+     * Injection point.
+     * Called with the configuration of a Shorts page right before its navigation bar mode is read.
+     */
+    public static void setReelWatchConfig(@Nullable MessageLite config) {
+        boolean showsBottomActionBar = false;
+        if (Settings.HIDE_SHORTS_PREVIEW_COMMENT.get() && config != null) {
+            try {
+                List<ProtoNode> fields = ProtoNode.parse(config.toByteArray());
+                if (fields != null) {
+                    // Field 8 holds the bar below the Short, its field 1 turns the bar on.
+                    ProtoNode enabled = ProtoNode.field(ProtoNode.message(fields, 8), 1);
+                    showsBottomActionBar = enabled != null && Long.valueOf(1).equals(enabled.getVarint());
+                }
+            } catch (Exception ex) {
+                Logger.printException(() -> "setReelWatchConfig failure", ex);
+            }
+        }
+        shortShowsBottomActionBar = showsBottomActionBar;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The Shorts opened from a channel show the comment bar below them instead of the navigation bar.
+     * When the comment bar is hidden, the navigation bar is kept.
+     *
+     * @param original The navigation bar mode: 1 shows it, 2 hides it,
+     *                 3 hides it if the Short fits the screen without it.
+     */
+    public static int getNavigationBarMode(int original) {
+        if (shortShowsBottomActionBar && (original == 2 || original == 3)) {
+            return 1;
+        }
+        return original;
+    }
+
     @Override
     public boolean isFiltered(ContextInterface contextInterface,
                               String identifier,
@@ -504,6 +632,17 @@ public final class ShortsFilter extends Filter {
             }
 
             if (matchedGroup == shortsCompactFeedVideo) {
+                // Every nested component of the video matches the path too. Their buffers are parts of the
+                // buffer of the video, which was checked before them, so only the video itself is checked.
+                // Searching the buffer of each nested component made the layout of the feed slow.
+                final int nameEnd = Utils.indexOf(path, ".e", Utils.indexOfFirstFound(path, SHORTS_COMPACT_FEED_VIDEO_PATHS));
+                if (Utils.indexOf(path, ".e", nameEnd + 2) >= 0) {
+                    return false;
+                }
+                // Same check as the Shorts shelf header, to not hide the Shorts tab of a channel.
+                if (Utils.contains(path, MODERN_FEED_LOCKUP_PATH) && !contextInterface.isHomeFeedOrRelatedVideo()) {
+                    return false;
+                }
                 // When a video is autoplaying in the feed, no new components are drawn on the screen.
                 // Therefore, filtering is skipped when the current PlayerType is [INLINE_MINIMAL].
                 return PlayerType.getCurrent() != PlayerType.INLINE_MINIMAL
@@ -614,6 +753,13 @@ public final class ShortsFilter extends Filter {
             return logDecision(component, hideHome, "player: home");
         }
 
+        // The feed behind the Shorts player is laid out again while the Shorts player is open,
+        // such as the search results a Short was opened from, whose search bar is not shown meanwhile.
+        if (NavigationBar.isSearchBarBehindShortsPlayer()) {
+            return hideShortsInFeed(component, "search behind the Shorts player",
+                    Settings.HIDE_SHORTS_SEARCH, buffer, rootComponent);
+        }
+
         // Must check second, as search can be from any tab.
         if (NavigationBar.isSearchBarActive()) {
             return hideShortsInFeed(component, "search", Settings.HIDE_SHORTS_SEARCH, buffer, rootComponent);
@@ -638,7 +784,10 @@ public final class ShortsFilter extends Filter {
             case SUBSCRIPTIONS -> hideShortsInFeed(component, "subscriptions tab",
                     Settings.HIDE_SHORTS_SUBSCRIPTIONS, buffer, rootComponent);
             case LIBRARY -> hideShortsInFeed(component, "library tab", Settings.HIDE_SHORTS_HISTORY, buffer, rootComponent);
-            default -> logDecision(component, false, "other tab: " + selectedNavButton);
+            default -> {
+                logDecision(component, false, "other tab: " + selectedNavButton);
+                yield false;
+            }
         };
     }
 
@@ -663,16 +812,15 @@ public final class ShortsFilter extends Filter {
      * @return The decision.
      */
     private static boolean logDecision(CharSequence component, boolean hide, String reason) {
-        if (BaseSettings.DEBUG.get()) {
+        Logger.printDebug(() -> {
             String message = "Shorts " + (hide ? "hidden" : "shown") + " (" + reason + ") player: "
                     + PlayerType.getCurrent() + " search bar: " + NavigationBar.isSearchBarActive()
                     + " component: " + component;
             // The same element is filtered again on every layout, which would fill the log.
-            if (!message.equals(lastDecisionLog)) {
-                lastDecisionLog = message;
-                Logger.printDebug(() -> message);
-            }
-        }
+            if (message.equals(lastDecisionLog)) return null;
+            lastDecisionLog = message;
+            return message;
+        });
         return hide;
     }
 
@@ -776,7 +924,6 @@ public final class ShortsFilter extends Filter {
                             }
                             navigationBar.setLayoutParams(params);
                         }
-                        return Unit.INSTANCE;
                     });
                 }
             }
@@ -792,6 +939,32 @@ public final class ShortsFilter extends Filter {
         if (HIDE_SHORTS_NAVIGATION_BAR) {
             pivotBarRef = new WeakReference<>(view);
         }
+    }
+
+    /**
+     * Injection point.
+     *
+     * @param renderers PushNotificationSupportedRenderers of a received push notification.
+     * @return If the notification opens a Short and is not shown.
+     */
+    public static boolean hideShortsNotification(@Nullable MessageLite renderers) {
+        if (!Settings.HIDE_SHORTS_NOTIFICATIONS.get() || renderers == null) {
+            return false;
+        }
+
+        try {
+            NavigationEndpoint endpoint = PushNotificationSupportedRenderers.parseFrom(renderers.toByteArray())
+                    .getAndroidPushNotificationRenderer()
+                    .getNavigationEndpoint();
+            if (endpoint.hasReelWatchEndpoint()) {
+                Logger.printDebug(() -> "Hiding Shorts push notification");
+                return true;
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "hideShortsNotification failure", ex);
+        }
+
+        return false;
     }
 
     /**

@@ -24,18 +24,13 @@ import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 
 /**
- * Fetches the lyrics of the track queued behind the current one, so the switch to it
- * finds them in the cache instead of waiting for the network.
+ * Fetches the lyrics of the track queued behind the current one, so the switch finds them
+ * in the cache instead of waiting on the network.
  *
- * <p>The work runs on a thread of its own, which is the whole point of it: a prefetch
- * must not be able to delay, cancel or take part in the lookup of the track that is
- * actually playing. It therefore never touches the lookup request id, the in-flight
- * fetches or the state, and it only ever adds to the lyrics cache.
- *
- * <p>Only what the lookup itself would store is written, so a prefetch never decides
- * which provider the user gets: the cache is keyed by provider, and a track no
- * provider answered for keeps its miss, which leaves the usual search running when the
- * track is reached.
+ * <p>Work runs on its own thread and must never delay the lookup of the playing track:
+ * it never touches the request id, in-flight fetches or the state, and only adds to the
+ * lyrics cache. The cache is keyed by provider, so a prefetch never decides which provider
+ * the user gets, and a track no provider answered for keeps its miss.
  */
 final class LyricsPrefetcher {
 
@@ -48,9 +43,8 @@ final class LyricsPrefetcher {
             });
 
     /**
-     * The video whose successor is being fetched, which is also the generation of the
-     * running task: a newer track replaces it, and the older task stops at its next
-     * checkpoint instead of fetching lyrics nobody asked for anymore.
+     * The video whose successor is being fetched, also the generation of the running task:
+     * a newer track replaces it, and the older task stops at its next checkpoint.
      */
     private static volatile String prefetchingFor;
 
@@ -142,7 +136,7 @@ final class LyricsPrefetcher {
             if (LyricsRequests.isCustomMatchMode()) return;
 
             try {
-                LyricsProvider.FetchResult result = provider.fetch(track);
+                LyricsProvider.FetchResult result = provider.fetchBySearch(track);
                 if (result == null || result.lyrics() == null
                         || result.lyrics() == Lyrics.NOT_FOUND) {
                     continue;
@@ -152,7 +146,9 @@ final class LyricsPrefetcher {
 
                 LyricsCache.put(track, LyricsMatch.cacheSourceFor(lyrics), lyrics, null);
                 Logger.printDebug(() -> "Lyrics prefetched: " + track + " via " + provider.name());
-                return;
+                if (!Settings.LYRICS_WORD_SYNC.get() || LyricsRequests.syncRank(lyrics) == 2) {
+                    return;
+                }
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 return;

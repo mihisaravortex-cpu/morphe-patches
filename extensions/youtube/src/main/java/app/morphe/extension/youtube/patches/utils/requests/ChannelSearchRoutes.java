@@ -71,6 +71,26 @@ public final class ChannelSearchRoutes {
     ).compile();
 
     /**
+     * The name of a channel, in the language of the request if the channel added a translation.
+     */
+    public static final Route.CompiledRoute GET_CHANNEL_NAME = new Route(
+            Route.Method.POST,
+            "browse" +
+                    "?prettyPrint=false" +
+                    "&fields=metadata.channelMetadataRenderer.title"
+    ).compile();
+
+    /**
+     * The channel id of a channel url, such as "<a href="https://www.youtube.com/@handle">...</a>".
+     */
+    public static final Route.CompiledRoute RESOLVE_CHANNEL_URL = new Route(
+            Route.Method.POST,
+            "navigation/resolve_url" +
+                    "?prettyPrint=false" +
+                    "&fields=endpoint.browseEndpoint.browseId"
+    ).compile();
+
+    /**
      * The title of a video in the language of the request, if the uploader added a translation
      * of the title. Titles that are not translated by the uploader are the original title.
      */
@@ -85,7 +105,7 @@ public final class ChannelSearchRoutes {
      * The exact publish date and view count of a video, for search results that are not in
      * the listed uploads of the channel. The search only shows these rounded, such as
      * "3 years ago" or "1.2M views", which is not enough to sort by them. The length is shown
-     * for every video but live streams and premieres.
+     * for every video but live streams and Premieres.
      * The description and tags tell whether a video matches a search by more than its title.
      */
     public static final Route.CompiledRoute GET_VIDEO_DETAILS = new Route(
@@ -212,6 +232,19 @@ public final class ChannelSearchRoutes {
         return new byte[0];
     }
 
+    public static byte[] createUrlBody(String url, Locale locale) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("context", createContext(locale));
+            body.put("url", url);
+
+            return body.toString().getBytes(StandardCharsets.UTF_8);
+        } catch (JSONException ex) {
+            Logger.printException(() -> "createUrlBody failed", ex);
+        }
+        return new byte[0];
+    }
+
     /**
      * The uploads playlist of a channel is its id with the "UC" prefix replaced,
      * and is browsed like a channel.
@@ -238,6 +271,31 @@ public final class ChannelSearchRoutes {
             return body.toString().getBytes(StandardCharsets.UTF_8);
         } catch (JSONException ex) {
             Logger.printException(() -> "createUploadsContinuationBody failed", ex);
+        }
+        return new byte[0];
+    }
+
+    /**
+     * Browse params of the channel "Posts" tab for the web client: {2: "community", 110: {1: {9: {}}}}.
+     * If the server does not take these, the params of the tab are read from the tabs of the response.
+     */
+    public static final String POSTS_TAB_PARAMS = "Egljb21tdW5pdHnyBgQKAkoA";
+
+    /**
+     * The posts tab of a channel, as the web client, which is served it without signing in.
+     *
+     * @param params Params of the posts tab.
+     */
+    public static byte[] createPostsTabBody(String channelId, String params, Locale locale) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("context", createContext(UPLOADS_CLIENT_NAME, locale));
+            body.put("browseId", channelId);
+            body.put("params", params);
+
+            return body.toString().getBytes(StandardCharsets.UTF_8);
+        } catch (JSONException ex) {
+            Logger.printException(() -> "createPostsTabBody failed", ex);
         }
         return new byte[0];
     }

@@ -1,5 +1,6 @@
 package com.reddit.domain.model;
 
+@SuppressWarnings("unused")
 public final class Comment extends IComment {
     public String getKindWithId() {
         throw new UnsupportedOperationException("Stub");
@@ -9,8 +10,12 @@ public final class Comment extends IComment {
         throw new UnsupportedOperationException("Stub");
     }
 
+    public String getAuthor() {
+        throw new UnsupportedOperationException("Stub");
+    }
+
     /**
-     * Added during patching by the Remember collapsed comments patch.
+     * Added during patching by the Remember collapsed comments and AutoModerator comments patches.
      */
     public void patch_setCollapsed(boolean collapsed) {
         throw new UnsupportedOperationException("Stub");

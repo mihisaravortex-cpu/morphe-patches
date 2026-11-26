@@ -15,8 +15,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
-import app.morphe.extension.youtube.innertube.IconOuterClass.Icon;
-import app.morphe.extension.youtube.innertube.IconOuterClass.YTIconType;
+import app.morphe.extension.shared.innertube.IconOuterClass.Icon;
+import app.morphe.extension.shared.innertube.IconOuterClass.YTIconType;
 
 /**
  * Small bounded wire editor; preserves unknown renderer fields and uses the host protobuf runtime.
@@ -134,7 +134,7 @@ final class NavigationProto {
 
     static byte[] series(byte[] home, String title) {
         // With the History identifier, the app opens every History page in this tab.
-        byte[] item = replace(home, 1, "morphe_series_tracker".getBytes(StandardCharsets.UTF_8));
+        byte[] item = replace(home, 1, HistoryNavigation.PIVOT_IDENTIFIER.getBytes(StandardCharsets.UTF_8));
         item = replace(item, 2, field(BROWSE, text(2, "FEhistory")));
         item = replace(item, 3, field(1, text(1, title)));
         item = replace(item, 4, field(75730170, text(2, title)));

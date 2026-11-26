@@ -7,7 +7,6 @@
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to Morphe contributions.
  */
-@file:Suppress("SpellCheckingInspection")
 
 package app.morphe.patches.youtube.video.information
 
@@ -60,6 +59,35 @@ internal object ChannelInformationFingerprint : Fingerprint(
     )
 )
 
+/**
+ * Makes a playback the current one, such as a preloaded Short when it's scrolled to,
+ * which is not loaded again with loadVideo().
+ */
+internal fun currentPlaybackFingerprint(playerResponseType: String) = Fingerprint(
+    classFingerprint = PlayerInitFingerprint,
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf("L"),
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this"
+        ),
+        // The player response of the playback.
+        methodCall(
+            returnType = playerResponseType,
+            parameters = listOf()
+        ),
+        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+        opcode(Opcode.IF_EQZ, location = MatchAfterImmediately()),
+        methodCall(
+            opcode = Opcode.INVOKE_STATIC,
+            parameters = listOf(playerResponseType, "L"),
+            location = MatchAfterImmediately()
+        )
+    )
+)
+
 internal fun getChannelIdFingerprint(playerResponseType: String) = object : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
@@ -70,11 +98,10 @@ internal fun getChannelIdFingerprint(playerResponseType: String) = object : Fing
             definingClass = playerResponseType,
             returnType = "Z"
         ),
-        // Channel id.
+        // Channel id. 21.17 places the live stream check far before it.
         methodCall(
             definingClass = playerResponseType,
-            returnType = "Ljava/lang/String;",
-            location = MatchAfterWithin(30)
+            returnType = "Ljava/lang/String;"
         ),
         string(
             string = "com.google.android.apps.youtube.mdx.watch.LAST_MEALBAR_PROMOTED_LIVE_FEED_CHANNELS",
@@ -98,13 +125,17 @@ internal fun getVideoTitleFingerprint(playerResponseType: String) = object : Fin
     )
 ) {}
 
+/**
+ * The channel name is read for the "Person" metadata of the app indexing.
+ * Some targets, such as 21.09, have the "setMetadata may only be called once" check in another place.
+ */
 internal fun getChannelNameFingerprint(playerResponseType: String) = object : Fingerprint(
     filters = listOf(
-        string("setMetadata may only be called once"),
+        string("Person"),
         methodCall(
             definingClass = playerResponseType,
             returnType = "Ljava/lang/String;",
-            location = MatchAfterWithin(30)
+            location = MatchAfterWithin(5)
         )
     )
 ) {}
@@ -123,11 +154,11 @@ internal object PlayerStatusEnumFingerprint : Fingerprint(
     )
 )
 
-internal fun getPlayerStatusFingerprint(playerStatusEnumClass: String) = object : Fingerprint(
+internal object PlayerStatusFingerprint : Fingerprint(
     classFingerprint = PlayerInitFingerprint,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
-    parameters = listOf(playerStatusEnumClass),
+    parameters = { listOf(PlayerStatusEnumFingerprint.originalClassDef.type) },
     filters = listOf(
         // The opcode for the first index of the method is sget-object.
         // Even in sufficiently old versions, such as YT 17.34, the opcode for the first index is sget-object.
@@ -137,7 +168,7 @@ internal fun getPlayerStatusFingerprint(playerStatusEnumClass: String) = object 
             name = "plus"
         )
     )
-) {}
+)
 
 internal object SeekFingerprint : Fingerprint(
     classFingerprint = PlayerInitFingerprint,
@@ -172,7 +203,8 @@ internal object VideoLengthFingerprint : Fingerprint(
         methodCall(returnType = "J", location = MatchAfterWithin(10)),
 
         methodCall(returnType = "Z", parameters = listOf()),
-        opcode(Opcode.CMP_LONG, location = MatchAfterWithin(8))
+        // 21.47+ has a branch before the compare that can skip it.
+        opcode(Opcode.CMP_LONG, location = MatchAfterWithin(30))
     )
 )
 
@@ -274,18 +306,6 @@ internal object SetPlaybackSpeedFormattedStringFingerprint : Fingerprint(
             name = "userSelectedPlaybackSpeed",
             parameters = listOf("F")
         )
-    )
-)
-
-// Class name is un-obfuscated in targets before 21.01
-internal object VideoQualityFingerprint : Fingerprint(
-    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.CONSTRUCTOR),
-    parameters = listOf(
-        "I", // Resolution.
-        "L",
-        "Ljava/lang/String;", // Human readable resolution: "480p", "1080p Premium", etc
-        "Z",
-        "L"
     )
 )
 

@@ -31,6 +31,7 @@ import app.morphe.extension.youtube.patches.utils.ProtoNode;
  * at the links replaced by attachments, and the runs are moved to the same texts in the original
  * description. Runs whose text is not in the original description are removed.
  */
+@SuppressWarnings("unused")
 final class OriginalDescription {
 
     /**
@@ -81,6 +82,11 @@ final class OriginalDescription {
         }
         List<String> originalTexts = splitAtAttachments(segments, originalDescription);
         if (originalTexts == null) {
+            // The shown description can be the original description, with an attachment whose link
+            // is not found, such as a playlist card, which would be removed with the link left as text.
+            if (showsOriginalTexts(segments, originalDescription)) {
+                return false;
+            }
             // The shown description is not a translation of the original description,
             // such as a description localized by the uploader with other attachments.
             // The original description replaces the first text, and the other segments are removed.
@@ -123,6 +129,32 @@ final class OriginalDescription {
     }
 
     /**
+     * @return If the texts of the text segments are in the original description in the same order,
+     *         so the shown description is not translated.
+     */
+    private static boolean showsOriginalTexts(List<ProtoNode> segments, String originalDescription) {
+        int from = 0;
+        boolean hasText = false;
+        for (ProtoNode segment : segments) {
+            ProtoNode text = ProtoNode.field(segment.children, SEGMENT_TEXT_FIELD);
+            ProtoNode content = text == null || text.children == null
+                    ? null
+                    : ProtoNode.field(text.children, TEXT_CONTENT_FIELD);
+            String shownText = content == null ? "" : trim(content.decodeUtf8());
+            if (shownText.isEmpty()) {
+                continue;
+            }
+            final int index = originalDescription.indexOf(shownText, from);
+            if (index < 0) {
+                return false;
+            }
+            from = index + shownText.length();
+            hasText = true;
+        }
+        return hasText;
+    }
+
+    /**
      * The description body is the message whose state id is {@link #BODY_STATE_ID}, and its segments
      * are its fields. Other messages of the element can include the state id, such as the state
      * of the element, but do not have segments with a text.
@@ -145,8 +177,8 @@ final class OriginalDescription {
                 ProtoNode content = segmentText == null || segmentText.children == null
                         ? null
                         : ProtoNode.field(segmentText.children, TEXT_CONTENT_FIELD);
-                if (content != null && content.getVarint() == null) {
-                    String decoded = decodeText(content);
+                if (content != null) {
+                    String decoded = content.decodeText();
                     hasText |= decoded != null && !decoded.isEmpty();
                 }
             }
@@ -164,21 +196,6 @@ final class OriginalDescription {
             }
         }
         return null;
-    }
-
-    /**
-     * @return The field decoded as text, or null if the field is not a text, such as bytes of other data.
-     */
-    @Nullable
-    static String decodeText(ProtoNode field) {
-        String decoded = field.decodeUtf8();
-        for (int i = 0, length = decoded.length(); i < length; i++) {
-            final char c = decoded.charAt(i);
-            if (c == '\uFFFD' || (Character.isISOControl(c) && c != '\n' && c != '\r' && c != '\t')) {
-                return null;
-            }
-        }
-        return decoded;
     }
 
     /**
@@ -253,6 +270,7 @@ final class OriginalDescription {
         return linkEnd < 0 ? null : new int[]{linkStart, linkEnd};
     }
 
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     private static boolean isNameCharacter(int codePoint) {
         return RestoreOriginalTitlesPatch.isWordCodePoint(codePoint) || codePoint == '_' || codePoint == '-' || codePoint == '.';
     }

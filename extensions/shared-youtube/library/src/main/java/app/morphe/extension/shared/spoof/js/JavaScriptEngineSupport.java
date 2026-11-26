@@ -9,6 +9,7 @@ import app.morphe.extension.shared.Logger;
 /**
  * Checks whether the device supports the JavaScriptEngine (backed by the system WebView's V8).
  */
+@SuppressWarnings("unused")
 public class JavaScriptEngineSupport {
     private static volatile boolean DEVICE_SUPPORTS_JS_ENGINE;
 
@@ -20,7 +21,7 @@ public class JavaScriptEngineSupport {
             // Checks if the system WebView supports the JavaScript sandbox.
             sandBoxSupport = JavaScriptSandbox.isSupported();
         } catch (Exception ex) {
-            Logger.printException(() -> "JavaScriptSandbox support check failed", ex);
+            Logger.printDebug(() -> "JavaScriptSandbox support check failed", ex);
         }
         DEVICE_SUPPORTS_JS_ENGINE = sandBoxSupport;
 
@@ -29,6 +30,7 @@ public class JavaScriptEngineSupport {
                 : "Device does not support JavaScriptEngine");
     }
 
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     public static boolean supportsJavaScriptEngine() {
         return DEVICE_SUPPORTS_JS_ENGINE;
     }

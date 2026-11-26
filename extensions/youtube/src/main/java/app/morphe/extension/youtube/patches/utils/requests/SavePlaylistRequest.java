@@ -15,25 +15,15 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.requests.Requester;
-import app.morphe.extension.shared.settings.BaseSettings;
 
 public class SavePlaylistRequest {
-    private static final int MAX_MILLISECONDS_TO_WAIT_FOR_FETCH = 20 * 1000;
-
-    public static final Map<String, SavePlaylistRequest> cache = Collections.synchronizedMap(
-            Utils.createSizeRestrictedMap(50));
-
     private final Future<Boolean> future;
 
     private SavePlaylistRequest(String playlistId, String libraryId, Map<String, String> requestHeader) {
@@ -42,24 +32,7 @@ public class SavePlaylistRequest {
 
     @Nullable
     public Boolean getResult() {
-        try {
-            if (BaseSettings.DEBUG.get() && !future.isDone() && Utils.isCurrentlyOnMainThread()) {
-                Logger.printException(() -> "Debug: Blocking main thread");
-            }
-            return future.get(MAX_MILLISECONDS_TO_WAIT_FOR_FETCH, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException ex) {
-            Logger.printInfo(() -> "getResult timed out", ex);
-        } catch (InterruptedException ex) {
-            Logger.printException(() -> "getResult interrupted", ex);
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException ex) {
-            Logger.printException(() -> "getResult failure", ex);
-        }
-        return null;
-    }
-
-    public static void clear() {
-        cache.clear();
+        return PlaylistRoutes.getResult(future, "getResult");
     }
 
     public static SavePlaylistRequest fetchRequestIfNeeded(
@@ -68,17 +41,7 @@ public class SavePlaylistRequest {
             Map<String, String> requestHeader
     ) {
         Objects.requireNonNull(playlistId);
-        return cache.put(libraryId, new SavePlaylistRequest(playlistId, libraryId, requestHeader));
-    }
-
-    @SuppressWarnings("unused")
-    @Nullable
-    public static SavePlaylistRequest getRequestForLibraryId(String libraryId) {
-        return cache.get(libraryId);
-    }
-
-    private static void handleConnectionError(String toastMessage, @Nullable Exception ex) {
-        Logger.printInfo(() -> toastMessage, ex);
+        return new SavePlaylistRequest(playlistId, libraryId, requestHeader);
     }
 
     @Nullable
@@ -100,11 +63,11 @@ public class SavePlaylistRequest {
             if (responseCode == Requester.HTTP_STATUS_CODE_SUCCESS) {
                 return Requester.parseJSONObject(connection);
             }
-            handleConnectionError("Save playlist failed with code: " + responseCode, null);
+            PlaylistRoutes.handleConnectionError("Save playlist failed with code: " + responseCode, null);
         } catch (SocketTimeoutException ex) {
-            handleConnectionError("Connection timeout", ex);
+            PlaylistRoutes.handleConnectionError("Connection timeout", ex);
         } catch (IOException ex) {
-            handleConnectionError("Network error", ex);
+            PlaylistRoutes.handleConnectionError("Network error", ex);
         } catch (Exception ex) {
             Logger.printException(() -> "sendRequest failed", ex);
         } finally {

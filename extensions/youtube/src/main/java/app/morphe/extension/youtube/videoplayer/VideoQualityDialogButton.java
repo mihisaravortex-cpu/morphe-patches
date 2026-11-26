@@ -48,7 +48,6 @@ import app.morphe.extension.youtube.patches.VideoInformation.VideoQualityInterfa
 import app.morphe.extension.youtube.patches.playback.quality.RememberVideoQualityPatch;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.PipDismissHelper;
-import kotlin.Unit;
 
 @SuppressWarnings("unused")
 public class VideoQualityDialogButton {
@@ -62,10 +61,8 @@ public class VideoQualityDialogButton {
     private static CharSequence currentOverlayText;
 
     static {
-        VideoInformation.onQualityChange.addObserver((@Nullable VideoQualityInterface quality) -> {
-            updateButtonText(quality);
-            return Unit.INSTANCE;
-        });
+        VideoInformation.onQualityChange.addObserver(
+                (@Nullable VideoQualityInterface quality) -> updateButtonText(quality));
     }
 
     /**
@@ -145,7 +142,7 @@ public class VideoQualityDialogButton {
                     if (resolution != VideoInformation.AUTOMATIC_VIDEO_QUALITY_VALUE &&
                             resolution <= defaultResolution) {
                         Logger.printDebug(() -> "Resetting quality to: " + quality);
-                        VideoInformation.changeQuality(quality);
+                        VideoInformation.changeQuality(RememberVideoQualityPatch.getPlayableQuality(quality));
                         return true;
                     }
                 }
@@ -290,14 +287,23 @@ public class VideoQualityDialogButton {
 
             // Add title with current quality.
             if (!Settings.HIDE_PLAYER_FLYOUT_QUALITY_HEADER.get()) {
-                TextView titleView = getTextView(context, spannableTitle);
+                TextView titleView = new TextView(context);
+                titleView.setText(spannableTitle);
+                titleView.setTextSize(16);
+                // Remove setTextColor since color is handled by SpannableStringBuilder.
+                LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+                titleParams.setMargins(Dim.dp12, Dim.dp16, 0, Dim.dp16);
+                titleView.setLayoutParams(titleParams);
                 mainLayout.addView(titleView);
             }
 
             // Create ListView for quality selection.
             ListView listView = new ListView(context);
             CustomQualityAdapter adapter = new CustomQualityAdapter(context, qualityLabels);
-            adapter.setSelectedPosition(listViewSelectedIndex);
+            adapter.selectedPosition = listViewSelectedIndex;
+            adapter.notifyDataSetChanged();
             listView.setAdapter(adapter);
             listView.setDivider(null);
 
@@ -308,9 +314,8 @@ public class VideoQualityDialogButton {
             listView.setOnItemClickListener((parent, view, which, id) -> {
                 try {
                     final int originalIndex = which + 1; // Adjust for automatic.
-                    VideoQualityInterface selectedQuality = currentQualities[originalIndex];
-                    RememberVideoQualityPatch.userChangedQuality(selectedQuality.patch_getResolution());
-                    VideoInformation.changeQuality(selectedQuality);
+                    VideoInformation.changeQuality(
+                            RememberVideoQualityPatch.userChangedQuality(currentQualities[originalIndex]));
 
                     dialog.dismiss();
                 } catch (Exception ex) {
@@ -327,31 +332,12 @@ public class VideoQualityDialogButton {
         }
     }
 
-    @NonNull
-    private static TextView getTextView(Context context, SpannableStringBuilder spannableTitle) {
-        TextView titleView = new TextView(context);
-        titleView.setText(spannableTitle);
-        titleView.setTextSize(16);
-        // Remove setTextColor since color is handled by SpannableStringBuilder.
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        titleParams.setMargins(Dim.dp12, Dim.dp16, 0, Dim.dp16);
-        titleView.setLayoutParams(titleParams);
-        return titleView;
-    }
-
     private static class CustomQualityAdapter extends ArrayAdapter<String> {
 
         private int selectedPosition = -1;
 
         public CustomQualityAdapter(@NonNull Context context, @NonNull List<String> objects) {
             super(context, 0, objects);
-        }
-
-        private void setSelectedPosition(int position) {
-            this.selectedPosition = position;
-            notifyDataSetChanged();
         }
 
         @NonNull

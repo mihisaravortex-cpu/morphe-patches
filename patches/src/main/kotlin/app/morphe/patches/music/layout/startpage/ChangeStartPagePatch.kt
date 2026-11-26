@@ -10,31 +10,34 @@ package app.morphe.patches.music.layout.startpage
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.fieldAccess
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.registersUsed
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
+import app.morphe.patches.music.misc.playservice.is_9_26_or_greater
+import app.morphe.patches.music.misc.playservice.versionCheckPatch
 import app.morphe.patches.music.misc.settings.PreferenceScreen
 import app.morphe.patches.music.misc.settings.settingsPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.patches.music.shared.MusicActivityOnCreateFingerprint
 import app.morphe.patches.shared.misc.settings.preference.ListPreference
 import app.morphe.util.findInstructionIndicesReversed
-import app.morphe.util.getReference
 import app.morphe.util.indexOfFirstInstructionReversed
 import app.morphe.util.indexOfFirstStringInstructionOrThrow
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/music/patches/ChangeStartPagePatch;"
 
-val changeStartPagePatch = bytecodePatch(
+val changeStartPagePatch = patch(
     name = "Change start page",
     description = "Adds an option to set which page the app opens in instead of the homepage.",
 ) {
     dependsOn(
         sharedExtensionPatch,
         settingsPatch,
+        versionCheckPatch,
     )
 
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
@@ -50,10 +53,13 @@ val changeStartPagePatch = bytecodePatch(
         ColdStartUpFingerprint.method.apply {
             val defaultBrowseIdIndex = indexOfFirstStringInstructionOrThrow("FEmusic_home")
 
-            val browseIdIndex = indexOfFirstInstructionReversed(defaultBrowseIdIndex) {
-                opcode == Opcode.IGET_OBJECT &&
-                        getReference<FieldReference>()?.type == "Ljava/lang/String;"
-            }
+            val browseIdIndex = indexOfFirstInstructionReversed(
+                defaultBrowseIdIndex,
+                fieldAccess(
+                    opcode = Opcode.IGET_OBJECT,
+                    type = "Ljava/lang/String;"
+                )
+            )
 
             if (browseIdIndex >= 0) {
                 val browseIdRegister = getInstruction<TwoRegisterInstruction>(browseIdIndex).registerA
@@ -72,6 +78,25 @@ val changeStartPagePatch = bytecodePatch(
                         """
                             invoke-static/range { v$returnRegister .. v$returnRegister }, $EXTENSION_CLASS->overrideBrowseId(Ljava/lang/String;)Ljava/lang/String;
                             move-result-object v$returnRegister
+                        """
+                    )
+                }
+            }
+        }
+
+        if (is_9_26_or_greater) {
+            // On cold start no root tab is active yet, and a library page that is not a
+            // Library tab root (Subscriptions) opens outside the Library tab and shows blank.
+            OpenInLibraryTabFingerprint.let {
+                it.method.apply {
+                    val equalsMatch = it.instructionMatches.last()
+                    val activeRootTagRegister = equalsMatch.instruction.registersUsed[1]
+
+                    addInstructions(
+                        equalsMatch.index,
+                        """
+                            invoke-static { v$activeRootTagRegister }, $EXTENSION_CLASS->overrideActiveRootTag(Ljava/lang/String;)Ljava/lang/String;
+                            move-result-object v$activeRootTagRegister
                         """
                     )
                 }

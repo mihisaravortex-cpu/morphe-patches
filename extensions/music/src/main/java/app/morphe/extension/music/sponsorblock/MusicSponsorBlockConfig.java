@@ -1,6 +1,6 @@
 /*
  * Copyright 2026 Morphe.
- * https://github.com/MorpheApp/morphe-patches
+ * https://github.com/MorpheApp/morphe-patches/pull/1842
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to Morphe contributions.
  */
@@ -13,11 +13,9 @@ import android.graphics.Rect;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import app.morphe.extension.music.patches.album.PlayAlbumSongsPatch;
-import app.morphe.extension.music.patches.album.PlaylistRequest;
 import app.morphe.extension.music.settings.Settings;
 import app.morphe.extension.music.shared.VideoInformation;
-import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.settings.BooleanSetting;
 import app.morphe.extension.shared.settings.FloatSetting;
 import app.morphe.extension.shared.settings.IntegerSetting;
@@ -32,6 +30,7 @@ import app.morphe.extension.shared.sponsorblock.SponsorBlockApi.PlayerStateAdapt
 import app.morphe.extension.shared.sponsorblock.SponsorBlockApi.SettingsAdapter;
 import app.morphe.extension.shared.sponsorblock.SponsorBlockApi.UiBridge;
 import app.morphe.extension.shared.sponsorblock.SponsorBlockApi.VideoInformationAdapter;
+import app.morphe.extension.shared.sponsorblock.SponsorBlockOfflineStorage;
 import app.morphe.extension.shared.sponsorblock.objects.CategoryBehaviour;
 import app.morphe.extension.shared.sponsorblock.objects.SegmentCategory;
 
@@ -46,17 +45,12 @@ public final class MusicSponsorBlockConfig implements Configuration {
 
     private static volatile boolean installed;
 
-    /** Video the player last reported, before any album song substitution. */
-    @Nullable
-    private static volatile String currentVideoId;
-
     /** Idempotent. Configures {@link SponsorBlockApi} on first call. */
     public static void install() {
         if (installed) return;
         synchronized (MusicSponsorBlockConfig.class) {
             if (installed) return;
             SponsorBlockApi.configure(INSTANCE);
-            PlayAlbumSongsPatch.addSubstitutionListener(MusicSponsorBlockConfig::videoIdResolved);
             installed = true;
         }
     }
@@ -77,20 +71,7 @@ public final class MusicSponsorBlockConfig implements Configuration {
     /** Injection point. */
     @SuppressWarnings("unused")
     public static void setCurrentVideoId(@Nullable String videoId) {
-        currentVideoId = videoId;
-        // The album patch can serve the streams of a song under the id of its music video,
-        // and the segments of the music video do not match that audio.
-        PlaylistRequest.Song song = PlayAlbumSongsPatch.getSong(videoId);
-        SegmentPlaybackController.setCurrentVideoId(song == null ? videoId : song.videoId());
-    }
-
-    /**
-     * The song of an album is often only known after the video id is set, so the segments of the
-     * music video are replaced once it is.
-     */
-    private static void videoIdResolved(@NonNull String videoId, @NonNull String resolvedVideoId) {
-        if (!videoId.equals(currentVideoId)) return;
-        Utils.runOnMainThread(() -> SegmentPlaybackController.setCurrentVideoId(resolvedVideoId));
+        SegmentPlaybackController.setCurrentVideoId(videoId);
     }
 
     /** Injection point. Inset by the rounded-end radius so segment markers align with the
@@ -110,6 +91,36 @@ public final class MusicSponsorBlockConfig implements Configuration {
     @SuppressWarnings("unused")
     public static void drawSegmentTimeBars(@NonNull Canvas canvas) {
         SegmentPlaybackController.drawSegmentTimeBars(canvas);
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Called when a song or video is saved with the offline video endpoint.
+     */
+    @SuppressWarnings("unused")
+    public static void offlineVideoAdded(String videoId) {
+        try {
+            if (videoId.isEmpty()) return;
+
+            SponsorBlockOfflineStorage.fetchAndSaveSegments(videoId);
+        } catch (Exception ex) {
+            Logger.printException(() -> "offlineVideoAdded failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Called when the app removes a saved song or video, after any prompt is confirmed.
+     */
+    @SuppressWarnings("unused")
+    public static void offlineVideoRemoved(String videoId) {
+        try {
+            SponsorBlockOfflineStorage.deleteSegments(videoId);
+        } catch (Exception ex) {
+            Logger.printException(() -> "offlineVideoRemoved failure", ex);
+        }
     }
 
     private MusicSponsorBlockConfig() {}
@@ -154,10 +165,11 @@ public final class MusicSponsorBlockConfig implements Configuration {
         @Override public @NonNull BooleanSetting toastOnConnectionError()       { return Settings.SB_TOAST_ON_CONNECTION_ERROR; }
         @Override public @NonNull StringSetting  apiUrl()                       { return Settings.SB_API_URL; }
         @Override public @Nullable BooleanSetting videoLengthWithoutSegments()  { return null; }
+        @Override public @NonNull BooleanSetting offlineSegments()              { return Settings.SB_OFFLINE_SEGMENTS; }
         @Override public @Nullable BooleanSetting toastOnWhitelistedChannel()   { return null; }
         @Override public @Nullable BooleanSetting autoHideSkipButton()          { return null; }
         @Override public @Nullable BooleanSetting userIsVip()                   { return null; }
-        @Override public @Nullable StringSetting  privateUserId()               { return Settings.SB_PRIVATE_USER_ID; }
+        @Override public StringSetting privateUserId()               { return Settings.SB_PRIVATE_USER_ID; }
         @Override public @Nullable FloatSetting   segmentMinDurationSeconds()   { return null; }
         @Override public @Nullable LongSetting    lastVipCheck()                { return null; }
         @Override public @Nullable BooleanSetting trackSkipCount()              { return null; }

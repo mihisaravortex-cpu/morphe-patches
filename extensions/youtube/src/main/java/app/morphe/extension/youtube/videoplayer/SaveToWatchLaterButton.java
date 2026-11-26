@@ -1,6 +1,7 @@
 /*
  * Copyright 2026 Morphe.
- * https://github.com/MorpheApp/morphe-patches
+ * https://github.com/MorpheApp/morphe-patches/pull/1274
+ * https://github.com/MorpheApp/morphe-patches/pull/4016
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to Morphe contributions.
  */
@@ -110,18 +111,17 @@ public class SaveToWatchLaterButton {
     }
 
     public static int addFlyoutButton(Object flyoutPanel, int nextButtonIndex, String flyoutVideoId,
-                                      boolean videoMarkedAsForKids, boolean isShortFlyout, boolean isTopFlyout) {
+                                      boolean isVideoFlyoutWithoutSaveItem, boolean isTopFlyout) {
         final String saveToWatchLaterButtonVideoId;
         if (!flyoutVideoId.isEmpty()) {
-            if (Settings.KIDS_SAVE_TO_WATCH_LATER_FLYOUT_BUTTON.get() &&
-                    videoMarkedAsForKids) {
-                saveToWatchLaterButtonVideoId = flyoutVideoId;
-            } else if (Settings.SHORTS_SAVE_TO_WATCH_LATER_FLYOUT_BUTTON.get() &&
-                    isShortFlyout) {
-                saveToWatchLaterButtonVideoId = flyoutVideoId;
-            } else {
-                saveToWatchLaterButtonVideoId = "";
-            }
+            // Only the menus without a save item, such as the menus of the videos in the watch page
+            // of a video for kids. Not the menus of the feed videos, whose save item can be hidden on purpose.
+            // Not if the app menu still has a save item, otherwise there are two items for the same action.
+            // The menus of playlists have no video to save.
+            saveToWatchLaterButtonVideoId = isVideoFlyoutWithoutSaveItem
+                    && !FlyoutUtils.hasAppSaveButton() && FlyoutUtils.getFlyoutPlaylistId().isEmpty()
+                    ? flyoutVideoId
+                    : "";
         } else if (Settings.SAVE_TO_WATCH_LATER_FLYOUT_BUTTON.get() &&
                 isTopFlyout) {
             saveToWatchLaterButtonVideoId = VideoInformation.getVideoId();
@@ -130,7 +130,7 @@ public class SaveToWatchLaterButton {
         }
 
         if (!saveToWatchLaterButtonVideoId.isEmpty()) {
-            nextButtonIndex = FlyoutUtils.addFlyoutButton(
+            nextButtonIndex = FlyoutUtils.addFlyoutSaveButton(
                     flyoutPanel,
                     saveToWatchLaterDrawable,
                     saveToWatchLaterButtonName,
@@ -138,7 +138,8 @@ public class SaveToWatchLaterButton {
                         SaveToWatchLaterPatch.saveVideo(saveToWatchLaterButtonVideoId);
                         FlyoutUtils.dismissFlyout();
                     },
-                    nextButtonIndex
+                    nextButtonIndex,
+                    false
             );
         }
         return nextButtonIndex;

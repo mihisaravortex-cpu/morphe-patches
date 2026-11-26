@@ -15,9 +15,9 @@ import app.morphe.patcher.InstructionLocation.MatchAfterWithin
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.literal
 import app.morphe.patcher.methodCall
-import app.morphe.patcher.string
 import app.morphe.patcher.resource.ResourceType
 import app.morphe.patcher.resourceLiteral
+import app.morphe.patcher.string
 import app.morphe.patches.shared.CurrentAudioVideoFormatToStringFingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
@@ -56,7 +56,7 @@ internal object AudioTrackRecordToStringFingerprint : Fingerprint(
             opcode = Opcode.IGET_BOOLEAN,
             definingClass = "this",
             type = "Z",
-            location = MatchAfterWithin(5)
+            location = MatchAfterWithin(8)
         ),
         string("id;displayName;isAutoDubbed;isDefault")
     )
@@ -144,6 +144,54 @@ internal fun getSetVideoQualityListFingerprint(
     custom = { _, classDef ->
         classDef.fields.find { it.type == playerControllerClass } != null
     }
+) {}
+
+/**
+ * YT 21.26+
+ *
+ * Quality menu controller of YouTube, a subclass of the class of [getSetVideoQualityListFingerprint]
+ * shared by the regular player and the Shorts player, with a second player controller field
+ * for the Shorts player.
+ */
+internal fun getShortsQualityMenuControllerFingerprint(
+    qualityMenuControllerClass: String,
+    playerControllerClass: String
+) = object : Fingerprint(
+    name = "<init>",
+    returnType = "V",
+    filters = listOf(
+        methodCall(
+            opcode = Opcode.INVOKE_DIRECT,
+            definingClass = qualityMenuControllerClass,
+            name = "<init>"
+        ),
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = playerControllerClass
+        )
+    )
+) {}
+
+/**
+ * YT 21.26+
+ *
+ * Returns if a Short is playing, which makes the class of [getShortsQualityMenuControllerFingerprint]
+ * use the player controller of the Shorts player.
+ */
+internal fun getShortsQualityMenuControllerIsShortsPlayerFingerprint(
+    shortsQualityMenuControllerClass: String
+) = object : Fingerprint(
+    definingClass = shortsQualityMenuControllerClass,
+    returnType = "Z",
+    parameters = listOf(),
+    filters = listOf(
+        methodCall(smali = "Lj$/util/Optional;->isPresent()Z"),
+        methodCall(
+            smali = "Lj$/util/Optional;->orElse(Ljava/lang/Object;)Ljava/lang/Object;",
+            location = MatchAfterWithin(20)
+        )
+    )
 ) {}
 
 /**

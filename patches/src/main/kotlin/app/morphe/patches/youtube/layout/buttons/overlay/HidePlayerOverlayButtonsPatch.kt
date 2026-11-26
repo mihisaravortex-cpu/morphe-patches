@@ -14,15 +14,16 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.patch
 import app.morphe.patcher.resource.ResourceType
 import app.morphe.patcher.resource.resourceId
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.getReference
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.shared.misc.settings.preference.NonInteractivePreference
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.shared.misc.settings.preference.noTitleUnsortedPreferenceCategory
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
-import app.morphe.patches.youtube.misc.playservice.is_20_28_or_greater
 import app.morphe.patches.youtube.misc.playservice.is_21_35_or_greater
 import app.morphe.patches.youtube.misc.playservice.is_21_42_or_greater
 import app.morphe.patches.youtube.misc.playservice.versionCheckPatch
@@ -30,8 +31,6 @@ import app.morphe.patches.youtube.misc.settings.settingsPatch
 import app.morphe.patches.youtube.shared.Constants.COMPATIBILITY_YOUTUBE
 import app.morphe.patches.youtube.shared.LayoutConstructorFingerprint
 import app.morphe.util.addInstructionsAtControlFlowLabel
-import app.morphe.util.findFreeRegister
-import app.morphe.util.getReference
 import app.morphe.util.indexOfFirstInstructionOrThrow
 import app.morphe.util.indexOfFirstResourceIdOrThrow
 import app.morphe.util.insertLiteralOverride
@@ -44,7 +43,7 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/youtube/patches/HidePlayerOverlayButtonsPatch;"
 
-val hidePlayerOverlayButtonsPatch = bytecodePatch(
+val hidePlayerOverlayButtonsPatch = patch(
     name = "Hide player overlay buttons",
     description = "Adds options to hide the player Cast, Autoplay, Captions, Previous & Next buttons, " +
             "and to hide or change the opacity of the player control buttons background.",
@@ -127,8 +126,8 @@ val hidePlayerOverlayButtonsPatch = bytecodePatch(
         } else if (is_21_35_or_greater) {
             OverlayCastButtonVisibilityLegacy2135Fingerprint.let {
                 it.method.apply {
-                    var instructionIndex = it.instructionMatches.first().index
-                    var instructionRegister = getInstruction<FiveRegisterInstruction>(
+                    val instructionIndex = it.instructionMatches.first().index
+                    val instructionRegister = getInstruction<FiveRegisterInstruction>(
                         instructionIndex
                     ).registerD
 
@@ -161,17 +160,15 @@ val hidePlayerOverlayButtonsPatch = bytecodePatch(
             }
         }
 
-        if (is_20_28_or_greater) {
-            arrayOf(
-                CastButtonPlayerFeatureFlagFingerprint,
-                CastButtonActionFeatureFlagFingerprint // Cast button in the feed.
-            ).forEach { fingerprint ->
-                fingerprint.matchAll().forEach {
-                    it.method.insertLiteralOverride(
-                        it.instructionMatches.first().index,
-                        "$EXTENSION_CLASS->hideCastButton(Z)Z"
-                    )
-                }
+        arrayOf(
+            CastButtonPlayerFeatureFlagFingerprint,
+            CastButtonActionFeatureFlagFingerprint // Cast button in the feed.
+        ).forEach { fingerprint ->
+            fingerprint.matchAll().forEach {
+                it.method.insertLiteralOverride(
+                    it.instructionMatches.first().index,
+                    "$EXTENSION_CLASS->hideCastButton(Z)Z"
+                )
             }
         }
 

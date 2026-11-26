@@ -7,12 +7,15 @@
 
 package app.morphe.patches.reddit.layout.post
 
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.BytecodePatchContext
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
+import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.getFreeRegisterProvider
+import app.morphe.patcher.util.getReference
+import app.morphe.patcher.util.registersUsed
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.reddit.misc.flag.featureFlagHookPatch
 import app.morphe.patches.reddit.misc.flag.hookFeatureFlag
@@ -21,15 +24,8 @@ import app.morphe.patches.reddit.misc.version.is_2026_39_0_or_greater
 import app.morphe.patches.reddit.misc.version.versionCheckPatch
 import app.morphe.patches.reddit.shared.Constants.COMPATIBILITY_REDDIT
 import app.morphe.util.addInstructionsAtControlFlowLabel
-import app.morphe.util.findFreeRegister
-import app.morphe.util.getFreeRegisterProvider
-import app.morphe.util.getReference
-import app.morphe.util.registersUsed
 import app.morphe.util.setExtensionIsPatchIncluded
-import com.android.tools.smali.dexlib2.AccessFlags
-import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
-import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import java.util.logging.Logger
 
 private const val EXTENSION_VIEW_COUNT_CLASS =
@@ -42,9 +38,9 @@ private const val EXTENSION_ROW_ARRANGEMENT_CLASS =
     $$"Lapp/morphe/extension/reddit/patches/FlipPostActionBarPatch$RowArrangement;"
 
 @Suppress("unused")
-val customizePostLayoutPatch = bytecodePatch(
+val customizePostLayoutPatch = patch(
     name = "Customize post layout",
-    description = "Adds options to show the view count of posts, to move the vote and comment buttons " +
+    description = "Adds options to show or hide the view count of posts, to move the vote and comment buttons " +
             "of posts to the right side, and to swap the vote and comment buttons. " +
             "Moving and swapping the buttons works with Reddit 2026.39.0 and newer."
 ) {
@@ -71,33 +67,19 @@ val customizePostLayoutPatch = bytecodePatch(
     }
 }
 
-private fun BytecodePatchContext.flipPostActionBar() {
+private fun flipPostActionBar() {
     // Implement the Compose horizontal arrangement interface with the extension class.
     ArrangementHorizontalArrangeFingerprint.let {
-        mutableClassDefBy(EXTENSION_ROW_ARRANGEMENT_CLASS).apply {
-            interfaces.add(it.classDef.type)
-            methods.add(
-                ImmutableMethod(
-                    type,
-                    it.method.name,
-                    it.method.parameters,
-                    "V",
-                    AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                    null,
-                    null,
-                    MutableMethodImplementation(6),
-                ).toMutable().apply {
-                    // Parameters: density, totalSize, sizes, layoutDirection, outPositions.
-                    addInstructions(
-                        0,
-                        """
-                            invoke-virtual { p0, p2, p3, p4, p5 }, $EXTENSION_ROW_ARRANGEMENT_CLASS->arrange(I[ILandroidx/compose/ui/unit/LayoutDirection;[I)V
-                            return-void
-                        """
-                    )
-                }
-            )
-        }
+        // Parameters: density, totalSize, sizes, layoutDirection, outPositions.
+        mutableClassDefBy(EXTENSION_ROW_ARRANGEMENT_CLASS).addPatchInterface(
+            it.classDef.type,
+            it.method.name,
+            """
+                invoke-virtual { p0, p2, p3, p4, p5 }, $EXTENSION_ROW_ARRANGEMENT_CLASS->arrange(I[ILandroidx/compose/ui/unit/LayoutDirection;[I)V
+                return-void
+            """,
+            it.method.parameterTypes.map { type -> type.toString() },
+        )
     }
 
     PostActionBarRowFingerprint.let {

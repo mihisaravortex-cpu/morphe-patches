@@ -9,18 +9,17 @@ package app.morphe.patches.music.layout.returnyoutubedislike
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patcher.patch.resourcePatch
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.getFreeRegisterProvider
 import app.morphe.patches.music.misc.settings.PreferenceScreen
 import app.morphe.patches.music.misc.settings.settingsPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.patches.music.video.information.musicVideoIdHook
 import app.morphe.patches.music.video.information.musicVideoInformationPatch
-import app.morphe.patches.shared.layout.returnyoutubedislike.DislikeFingerprint
 import app.morphe.patches.shared.layout.returnyoutubedislike.EndpointServiceNameFingerprint
 import app.morphe.patches.shared.layout.returnyoutubedislike.hookLikeDislikeButtons
-import app.morphe.patches.shared.layout.returnyoutubedislike.likeEndpointParserFingerprint
-import app.morphe.patches.shared.layout.returnyoutubedislike.requestParameterCheckFingerprint
+import app.morphe.patches.shared.layout.returnyoutubedislike.LikeEndpointParserFingerprint
+import app.morphe.patches.shared.layout.returnyoutubedislike.RequestParameterCheckFingerprint
 import app.morphe.patches.shared.misc.settings.preference.NonInteractivePreference
 import app.morphe.patches.shared.misc.settings.preference.PreferenceCategory
 import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference
@@ -28,12 +27,9 @@ import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.shared.misc.settings.preference.screenInfoPreferenceCategory
 import app.morphe.patches.shared.misc.textcomponent.hookSpannableString
 import app.morphe.patches.shared.misc.textcomponent.textComponentPatch
-import app.morphe.util.getFreeRegisterProvider
-import app.morphe.util.getReference
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 
-private val returnYouTubeDislikeResourcePatch = resourcePatch {
+private val returnYouTubeDislikeResourcePatch = patch {
     dependsOn(settingsPatch)
 
     execute {
@@ -66,8 +62,7 @@ private val returnYouTubeDislikeResourcePatch = resourcePatch {
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/ReturnYouTubeDislikePatch;"
 
-@Suppress("unused")
-val returnYouTubeDislikePatch = bytecodePatch(
+val returnYouTubeDislikePatch = patch(
     name = "Return YouTube Dislike",
     description = "Adds an option to show the dislike count of tracks with Return YouTube Dislike.",
 ) {
@@ -84,12 +79,11 @@ val returnYouTubeDislikePatch = bytecodePatch(
         // region Hook like/dislike/remove like button clicks to send votes to the API.
 
         val endPointServiceNameField = EndpointServiceNameFingerprint
-            .instructionMatches.last().instruction.getReference<FieldReference>()!!
-        val likeEndpointParserClass = DislikeFingerprint.classDef.superclass!!
-        val videoIdField = requestParameterCheckFingerprint(likeEndpointParserClass)
-            .instructionMatches.last().instruction.getReference<FieldReference>()!!
+            .instructionMatches.last().fieldReference
+        val videoIdField = RequestParameterCheckFingerprint
+            .instructionMatches.last().fieldReference
 
-        likeEndpointParserFingerprint(likeEndpointParserClass).let {
+        LikeEndpointParserFingerprint.let {
             it.method.apply {
                 val insertIndex = it.instructionMatches[1].index + 1
                 val likeEndpointTargetClassRegister =

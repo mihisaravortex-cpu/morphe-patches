@@ -15,11 +15,14 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patcher.patch.resourcePatch
+import app.morphe.patcher.patch.patch
 import app.morphe.patcher.resource.ResourceType
 import app.morphe.patcher.resourceLiteral
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.matchAllMethodIndicesForEach
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
+import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
+import app.morphe.patcher.util.registersUsed
 import app.morphe.patches.shared.ad.hideFullscreenAdsPatch
 import app.morphe.patches.shared.misc.litho.filter.addLithoFilter
 import app.morphe.patches.shared.misc.proto.hookElement
@@ -32,22 +35,29 @@ import app.morphe.patches.youtube.misc.engagement.addEngagementPanelIdHook
 import app.morphe.patches.youtube.misc.engagement.engagementPanelHookPatch
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
 import app.morphe.patches.youtube.misc.litho.filter.lithoFilterPatch
+import app.morphe.patches.youtube.misc.playservice.is_21_25_or_greater
 import app.morphe.patches.youtube.misc.playservice.versionCheckPatch
 import app.morphe.patches.youtube.misc.proto.elementProtoParserHookPatch
 import app.morphe.patches.youtube.misc.settings.PreferenceScreen
 import app.morphe.patches.youtube.misc.settings.settingsPatch
 import app.morphe.patches.youtube.shared.BuildClientContextBodyConstructorFingerprint
 import app.morphe.patches.youtube.shared.Constants.COMPATIBILITY_YOUTUBE
-import app.morphe.util.matchAllMethodIndicesForEach
-import app.morphe.util.registersUsed
+import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/youtube/patches/components/AdsFilter;"
 
-private val hideAdsResourcePatch = resourcePatch {
+/**
+ * Category of the activated ad slot triggers that expire the slot.
+ */
+private const val SLOT_EXPIRATION_TRIGGER_CATEGORY = 6
+
+private val hideAdsResourcePatch = patch {
     dependsOn(
         lithoFilterPatch,
         settingsPatch,
@@ -76,8 +86,7 @@ private val hideAdsResourcePatch = resourcePatch {
     }
 }
 
-@Suppress("unused")
-val hideAdsPatch = bytecodePatch(
+val hideAdsPatch = patch(
     name = "Hide ads",
     description = "Adds options to hide general ads, Premium promotions and video ads."
 ) {
@@ -95,17 +104,87 @@ val hideAdsPatch = bytecodePatch(
     execute {
         // Hide video ads
 
-        setOf(
-            LoadVideoAdsFingerprint,
-            PlayerBytesAdLayoutFingerprint,
-        ).forEach { fingerprint ->
-            fingerprint.method.addInstructionsWithLabels(
+        PlayerBytesAdLayoutFingerprint.method.addInstructionsWithLabels(
+            0,
+            """
+                invoke-static { }, $EXTENSION_CLASS->hideVideoAds()Z
+                move-result v0
+                if-eqz v0, :show_video_ads
+                return-void
+                :show_video_ads
+                nop
+            """
+        )
+
+        // Only the triggers that expire the ad slots are handled, so no ad slot is entered.
+        // The slots are kept by the app until they expire, so without these triggers
+        // every video adds its ad slots to the slots that are kept until the app closes.
+        LoadVideoAdsFingerprint.let {
+            val categoryField = it.instructionMatches.first().fieldReference
+
+            val filterTriggersMethod = ImmutableMethod(
+                it.classDef.type,
+                "patch_filterVideoAdTriggers",
+                listOf(ImmutableMethodParameter("Ljava/util/List;", null, null)),
+                "Ljava/util/List;",
+                AccessFlags.PRIVATE.value or AccessFlags.STATIC.value,
+                null,
+                null,
+                MutableMethodImplementation(6),
+            ).toMutable().apply {
+                addInstructionsWithLabels(
+                    0,
+                    """
+                        invoke-static { }, $EXTENSION_CLASS->hideVideoAds()Z
+                        move-result v0
+                        if-eqz v0, :keep_triggers
+                        new-instance v0, Ljava/util/ArrayList;
+                        invoke-direct { v0 }, Ljava/util/ArrayList;-><init>()V
+                        invoke-interface { p0 }, Ljava/util/List;->iterator()Ljava/util/Iterator;
+                        move-result-object v1
+                        const/16 v4, $SLOT_EXPIRATION_TRIGGER_CATEGORY
+                        :next_trigger
+                        invoke-interface { v1 }, Ljava/util/Iterator;->hasNext()Z
+                        move-result v2
+                        if-eqz v2, :filtered_triggers
+                        invoke-interface { v1 }, Ljava/util/Iterator;->next()Ljava/lang/Object;
+                        move-result-object v2
+                        check-cast v2, ${categoryField.definingClass}
+                        iget v3, v2, $categoryField
+                        if-ne v3, v4, :next_trigger
+                        invoke-interface { v0, v2 }, Ljava/util/List;->add(Ljava/lang/Object;)Z
+                        goto :next_trigger
+                        :filtered_triggers
+                        return-object v0
+                        :keep_triggers
+                        return-object p0
+                    """
+                )
+            }
+            it.classDef.methods.add(filterTriggersMethod)
+
+            it.method.addInstructions(
+                0,
+                """
+                    invoke-static/range { p1 .. p1 }, $filterTriggersMethod
+                    move-result-object p1
+                """
+            )
+        }
+
+        // The player defers the start of playback until the player bytes ad slot is
+        // scheduled. The hooks above stop the slot from ever being scheduled, so the
+        // deferral is never released and the video never starts. Skip the deferral.
+        if (is_21_25_or_greater) {
+            PlayerBytesAdSchedulingFingerprint.method.addInstructionsWithLabels(
                 0,
                 """
                     invoke-static { }, $EXTENSION_CLASS->hideVideoAds()Z
                     move-result v0
                     if-eqz v0, :show_video_ads
-                    return-void
+                    invoke-static { }, Lj$/util/Optional;->empty()Lj$/util/Optional;
+                    move-result-object v0
+                    return-object v0
                     :show_video_ads
                     nop
                 """
@@ -151,16 +230,15 @@ val hideAdsPatch = bytecodePatch(
 
         // Hide get premium
 
-        GetPremiumViewFingerprint.method.apply {
-            val startIndex = GetPremiumViewFingerprint.instructionMatches.first().index
-            val measuredWidthRegister = getInstruction<TwoRegisterInstruction>(startIndex).registerA
-            val measuredHeightInstruction = getInstruction<TwoRegisterInstruction>(startIndex + 1)
+        GetPremiumViewFingerprint.let {
+            val setMeasuredDimension = it.instructionMatches.first()
+            val index = setMeasuredDimension.index
+            val measuredWidthRegister = setMeasuredDimension.instruction.registersUsed[1]
+            val measuredHeightRegister = setMeasuredDimension.instruction.registersUsed[2]
+            val tempRegister = it.method.findFreeRegister(index, measuredWidthRegister, measuredHeightRegister)
 
-            val measuredHeightRegister = measuredHeightInstruction.registerA
-            val tempRegister = measuredHeightInstruction.registerB
-
-            addInstructionsWithLabels(
-                startIndex + 2,
+            it.method.addInstructionsWithLabels(
+                index,
                 """
                     # Override the internal measurement of the layout with zero values.
                     invoke-static {}, $EXTENSION_CLASS->hideGetPremiumView()Z
@@ -251,13 +329,17 @@ val hideAdsPatch = bytecodePatch(
         setOf(
             Endpoint.GET_WATCH,
             Endpoint.PLAYER,
-            Endpoint.REEL,
         ).forEach { endpoint ->
             addOSNameHook(
                 endpoint,
                 "$EXTENSION_CLASS->hideVideoAds(Ljava/lang/String;)Ljava/lang/String;"
             )
         }
+
+        addOSNameHook(
+            Endpoint.REEL,
+            "$EXTENSION_CLASS->hideShortsAds(Ljava/lang/String;)Ljava/lang/String;"
+        )
 
         addOSNameHook(
             Endpoint.GUIDE,

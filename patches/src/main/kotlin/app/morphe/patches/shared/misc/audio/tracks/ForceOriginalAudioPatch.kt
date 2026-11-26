@@ -12,12 +12,11 @@ package app.morphe.patches.shared.misc.audio.tracks
 
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.BytecodePatchBuilder
-import app.morphe.patcher.patch.BytecodePatchContext
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.PatchDefinition
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
 import app.morphe.patcher.util.proxy.mutableTypes.MutableField.Companion.toMutable
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patches.shared.FormatStreamModelToStringFingerprint
@@ -26,7 +25,6 @@ import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.util.addInstructionsAtControlFlowLabel
 import app.morphe.util.cloneMutable
 import app.morphe.util.findMethodFromToString
-import app.morphe.util.getReference
 import app.morphe.util.indexOfFirstInstructionReversedOrThrow
 import app.morphe.util.insertLiteralOverride
 import com.android.tools.smali.dexlib2.AccessFlags
@@ -34,8 +32,6 @@ import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.reference.FieldReference
-import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableField
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
@@ -49,14 +45,15 @@ private const val EXTENSION_AUDIO_TRACK_INTERFACE =
  * Patch shared with YouTube and YT Music.
  */
 internal fun forceOriginalAudioPatch(
-    block: BytecodePatchBuilder.() -> Unit = {},
-    executeBlock: BytecodePatchContext.() -> Unit = {},
-    fixUseLocalizedAudioTrackFlag: BytecodePatchContext.() -> Boolean,
-    forcedServerAdaptiveStreaming: BytecodePatchContext.() -> Boolean,
+    block: PatchDefinition.() -> Unit = {},
+    executeBlock: () -> Unit = {},
+    fixUseLocalizedAudioTrackFlag: () -> Boolean,
+    forcedServerAdaptiveStreaming: () -> Boolean,
+    shortsQualityMenuController: Boolean = false,
     mainActivityOnCreateFingerprint: Fingerprint,
     subclassExtensionClassDescriptor: String,
     preferenceScreen: BasePreferenceScreen.Screen
-) = bytecodePatch(
+) = patch(
     name = "Force original audio",
     description = "Adds an option to always use the original audio track.",
 ) {
@@ -171,51 +168,22 @@ internal fun forceOriginalAudioPatch(
                     1 to "patch_getDisplayName",
                     3 to "patch_getIsDefault"
                 ).forEach { (matchIndex, methodName) ->
-                    val fieldInstruction = instructionMatches[matchIndex].instruction
-                    val fieldOpcode = fieldInstruction.opcode.name
-                    val fieldReference = fieldInstruction.getReference<FieldReference>()!!
-                    val fieldReturnType = fieldReference.type
-                    val operation = if (fieldReturnType == "Z") {
-                        "return v0"
-                    } else {
-                        "return-object v0"
-                    }
-
-                    val helperMethod = ImmutableMethod(
-                        definingClass,
-                        methodName,
-                        listOf(),
-                        fieldReturnType,
-                        AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                        null,
-                        null,
-                        MutableMethodImplementation(2),
-                    ).toMutable().apply {
-                        addInstructions(
-                            0,
-                            """
-                                $fieldOpcode v0, p0, $fieldReference
-                                $operation
-                            """
-                        )
-                    }
-
-                    classDef.methods.add(helperMethod)
+                    val fieldReference = instructionMatches[matchIndex].fieldReference
+                    classDef.addPatchInterface(EXTENSION_AUDIO_TRACK_INTERFACE, methodName, fieldReference)
                 }
 
-                classDef.interfaces.add(EXTENSION_AUDIO_TRACK_INTERFACE)
                 definingClass
             }
 
             val setAudioTrackMethod =
                 getAudioTrackItemOnClickFingerprint(audioTrackRecordClass)
-                    .instructionMatches.last().instruction.getReference<MethodReference>()!!
+                    .instructionMatches.last().methodReference
 
             val playerControllerClass = setAudioTrackMethod.definingClass
 
             val audioTrackRecordArrayField =
                 getCurrentAudioFormatConstructorFingerprint(audioTrackRecordClass)
-                    .instructionMatches.last().instruction.getReference<FieldReference>()!!
+                    .instructionMatches.last().fieldReference
 
             getSetVideoQualityListFingerprint(
                 audioVideoFormatClass = audioTrackRecordArrayField.definingClass,
@@ -233,7 +201,8 @@ internal fun forceOriginalAudioPatch(
                             )
                         ),
                         "V",
-                        AccessFlags.PRIVATE.value or AccessFlags.FINAL.value,
+                        // Public and not final, so a subclass can override it.
+                        AccessFlags.PUBLIC.value,
                         null,
                         null,
                         MutableMethodImplementation(3),
@@ -260,6 +229,59 @@ internal fun forceOriginalAudioPatch(
 
                     it.classDef.methods.add(helperMethod)
 
+                    if (shortsQualityMenuController) {
+                        // The quality menu controller is a subclass that sends the changes to the
+                        // player controller of the Shorts player while a Short is playing.
+                        // The player controller of the superclass has no player while a Short
+                        // is playing and ignores the audio track, so do the same as the subclass.
+                        val shortsQualityMenuControllerClass = getShortsQualityMenuControllerFingerprint(
+                            qualityMenuControllerClass = definingClass,
+                            playerControllerClass = playerControllerClass
+                        ).classDef
+
+                        val isShortsPlayerMethod = getShortsQualityMenuControllerIsShortsPlayerFingerprint(
+                            shortsQualityMenuControllerClass.type
+                        ).method
+
+                        val shortsPlayerControllerField = shortsQualityMenuControllerClass.fields.single { field ->
+                            field.type == playerControllerClass
+                        }
+
+                        shortsQualityMenuControllerClass.methods.add(
+                            ImmutableMethod(
+                                shortsQualityMenuControllerClass.type,
+                                helperMethod.name,
+                                helperMethod.parameters,
+                                helperMethod.returnType,
+                                AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
+                                null,
+                                null,
+                                MutableMethodImplementation(3),
+                            ).toMutable().apply {
+                                addInstructionsWithLabels(
+                                    0,
+                                    """
+                                        invoke-virtual { p0 }, $isShortsPlayerMethod
+                                        move-result v0
+                                        if-eqz v0, :regular_player
+                                        
+                                        # Check if the audio track id is null.
+                                        if-eqz p1, :ignore
+                                        iget-object v0, p0, $shortsPlayerControllerField
+                                        invoke-virtual { v0, p1 }, $setAudioTrackMethod
+                                        
+                                        :ignore
+                                        return-void
+                                        
+                                        :regular_player
+                                        invoke-super { p0, p1 }, $helperMethod
+                                        return-void
+                                    """
+                                )
+                            }
+                        )
+                    }
+
                     val index = it.instructionMatches.first().index
                     val instruction = getInstruction<TwoRegisterInstruction>(index)
                     val freeRegister = instruction.registerA
@@ -271,7 +293,7 @@ internal fun forceOriginalAudioPatch(
                             iget-object v$freeRegister, v$audioVideoFormatRegister, $audioTrackRecordArrayField
                             invoke-static { v$freeRegister }, $EXTENSION_CLASS->getDefaultAudioTrackId([${EXTENSION_AUDIO_TRACK_INTERFACE})Ljava/lang/String;
                             move-result-object v$freeRegister
-                            invoke-direct { p0, v$freeRegister }, $helperMethod
+                            invoke-virtual { p0, v$freeRegister }, $helperMethod
                         """
                     )
                 }

@@ -12,9 +12,11 @@ package app.morphe.extension.youtube.patches.components;
 
 import android.view.View;
 
+import com.google.protobuf.InvalidProtocolBufferException;
+
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
-import app.morphe.extension.shared.ByteTrieSearch;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.StringTrieSearch;
 import app.morphe.extension.shared.Utils;
@@ -23,9 +25,16 @@ import app.morphe.extension.shared.patches.components.ByteArrayFilterGroup;
 import app.morphe.extension.shared.patches.components.ContextInterface;
 import app.morphe.extension.shared.patches.components.Filter;
 import app.morphe.extension.shared.patches.components.StringFilterGroup;
+import app.morphe.extension.youtube.innertube.ElementTexts;
+import app.morphe.extension.youtube.innertube.ElementTexts.LockupMetadataViewModel;
+import app.morphe.extension.youtube.innertube.ElementTexts.MetadataBadge;
+import app.morphe.extension.youtube.innertube.ElementTexts.MetadataRow;
+import app.morphe.extension.youtube.innertube.FeedCardLayoutOuterClass.Element;
+import app.morphe.extension.youtube.innertube.FeedCardLayoutOuterClass.ElementModel;
 import app.morphe.extension.youtube.patches.NavigationBarPatch;
 import app.morphe.extension.youtube.patches.VideoInformation;
 import app.morphe.extension.youtube.patches.spoof.SpoofOSNamePatch;
+import app.morphe.extension.youtube.patches.utils.FeedVideoCardsPatch;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.whitelist.ChannelWhitelist;
 import app.morphe.extension.youtube.whitelist.WhitelistType;
@@ -44,15 +53,30 @@ public final class AdsFilter extends Filter {
             Settings.HIDE_END_SCREEN_STORE_BANNER.get();
 
     private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
-    private static final ByteTrieSearch statementBannerSearch = new ByteTrieSearch(
-            ByteTrieSearch.convertStringsToBytes("statement_banner"));
-    private static final ByteTrieSearch yoodleSearch = new ByteTrieSearch(
-            ByteTrieSearch.convertStringsToBytes("EgliaWd5b29kbGU")); // Base64 chunk that decodes to 'bigyoodle'
+    /**
+     * Searched in every element on the main thread, see FeedVideoCardsPatch.getElementText().
+     */
+    private static final String STATEMENT_BANNER = "statement_banner";
+    private static final String YOODLE = "EgliaWd5b29kbGU"; // Base64 chunk that decodes to 'bigyoodle'
+    /**
+     * Browse id of the Premium page, opened by the buttons of the Premium promotions.
+     */
+    private static final String PREMIUM_BROWSE_ID = "SPunlimited";
+    /**
+     * Images of the YouTube promotions, such as <a href="https://www.gstatic.com/youtube/img/promos/growth/abc_960x300.png">...</a>.
+     * The images of the videos are on other hosts.
+     */
+    private static final String PROMOTION_IMAGE_PATH = "gstatic.com/youtube/img/promos/";
+    /**
+     * Style of the 'Premium' badge below the metadata of a video.
+     */
+    private static final int PREMIUM_BADGE_STYLE = 11;
 
     private final StringTrieSearch exceptions = new StringTrieSearch();
 
     private final StringFilterGroup buyMovieAd;
     private final ByteArrayFilterGroup buyMovieAdBuffer;
+    private final StringFilterGroup premiumVideo;
     private final StringFilterGroup productCard;
     private final ByteArrayFilterGroup productCardBuffer;
     private final StringFilterGroup shortsPaidPromotionLabel;
@@ -144,6 +168,14 @@ public final class AdsFilter extends Filter {
                 "shorts_disclosures.e"
         );
 
+        // Root elements of the videos, which hold the badges of the video.
+        // The videos that only YouTube Premium can play are hidden as Premium promotions.
+        premiumVideo = new StringFilterGroup(
+                Settings.HIDE_YOUTUBE_PREMIUM_PROMOTIONS,
+                "video_lockup_with_attachment.e",
+                "lockup.e" // Card layout.
+        );
+
         productCard = new StringFilterGroup(
                 Settings.HIDE_SHOPPING_LINKS,
                 "expandable_metadata.e",
@@ -195,6 +227,7 @@ public final class AdsFilter extends Filter {
                 merchandise,
                 movieAds,
                 paidPromotionLabel,
+                premiumVideo,
                 productCard,
                 productSticker,
                 selfSponsor,
@@ -222,6 +255,10 @@ public final class AdsFilter extends Filter {
             return contentIndex == 0 && buyMovieAdBuffer.check(buffer).isFiltered();
         }
 
+        if (matchedGroup == premiumVideo) {
+            return contentIndex == 0 && isPremiumVideo(buffer);
+        }
+
         if (matchedGroup == productCard) {
             return productCardBuffer.check(buffer).isFiltered();
         }
@@ -231,6 +268,41 @@ public final class AdsFilter extends Filter {
         }
 
         return !exceptions.matches(path);
+    }
+
+    /**
+     * The text of the badge is localized, so the badge is found by its style.
+     *
+     * @param buffer Buffer of the root element of a video.
+     * @return If the video has the 'Premium' badge, such as the YouTube Premium exclusive movies,
+     *         which can only be played with YouTube Premium.
+     */
+    private static boolean isPremiumVideo(byte[] buffer) {
+        try {
+            ElementTexts.ElementModel model = KeywordContentFilter.findModel(ElementTexts.Element.parseFrom(buffer));
+            if (model == null) {
+                return false;
+            }
+
+            LockupMetadataViewModel metadata = model.hasVideoWithContextModel()
+                    ? model.getVideoWithContextModel().getData().getVideoData()
+                            .getLockupMetadata().getLockupMetadataViewModel()
+                    : model.getYoutubeModel().getViewModel().getLockupViewModel()
+                            .getMetadata().getLockupMetadataViewModel();
+
+            for (MetadataRow row : metadata.getMetadata().getContentMetadataViewModel().getMetadataRowsList()) {
+                for (MetadataBadge badge : row.getBadgesList()) {
+                    if (badge.getBadgeViewModel().getBadgeStyle() == PREMIUM_BADGE_STYLE) {
+                        Logger.printDebug(() -> "Hiding YouTube Premium video");
+                        return true;
+                    }
+                }
+            }
+        } catch (InvalidProtocolBufferException ex) {
+            Logger.printException(() -> "isPremiumVideo failure", ex);
+        }
+
+        return false;
     }
 
     /**
@@ -313,8 +385,22 @@ public final class AdsFilter extends Filter {
      */
     public static byte[] hideStatementBanner(byte[] bytes) {
         try {
-            if (statementBannerSearch.matches(bytes)) {
-                final boolean isDoodle = yoodleSearch.matches(bytes);
+            final String elementText = FeedVideoCardsPatch.getElementText(bytes);
+            if (elementText.contains(PREMIUM_BROWSE_ID) && elementText.contains(PROMOTION_IMAGE_PATH)
+                    && Settings.HIDE_YOUTUBE_PREMIUM_PROMOTIONS.get()) {
+                // The accounts of a newer A/B test of the feed cards get the Premium promotion as a card,
+                // with a promotion image instead of the thumbnail of a video.
+                ElementModel model = Element.parseFrom(bytes).getType().getComponentType().getModel();
+                if (model.hasLockupModel() && model.getLockupModel().getViewModel().getLockupViewModel()
+                        .getContentImage().getThumbnailViewModel().getImage()
+                        .toString(StandardCharsets.ISO_8859_1).contains(PROMOTION_IMAGE_PATH)) {
+                    Logger.printDebug(() -> "Hiding YouTube Premium promotion card");
+                    return EMPTY_BYTE_ARRAY;
+                }
+            }
+
+            if (elementText.contains(STATEMENT_BANNER)) {
+                final boolean isDoodle = elementText.contains(YOODLE);
 
                 if (isDoodle) {
                     if (Settings.HIDE_YOUTUBE_DOODLES.get()) {
@@ -333,6 +419,16 @@ public final class AdsFilter extends Filter {
         }
 
         return bytes;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * The ads of the Shorts feed are placed between the Shorts of every channel,
+     * so they are not ads of a whitelisted channel.
+     */
+    public static String hideShortsAds(String osName) {
+        return SpoofOSNamePatch.getOSName(Settings.HIDE_VIDEO_ADS.get());
     }
 
     /**

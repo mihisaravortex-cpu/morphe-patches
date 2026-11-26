@@ -47,10 +47,6 @@ public final class ChangeStartPagePatch extends BaseChangeStartPagePatch {
             this.id = id;
             this.isBrowseId = isBrowseId;
         }
-
-        private boolean isBrowseId() {
-            return TRUE.equals(isBrowseId);
-        }
     }
 
     private static final String SETTINGS_CLASS = "com.google.android.apps.youtube.music.settings.SettingsCompatActivity";
@@ -102,7 +98,24 @@ public final class ChangeStartPagePatch extends BaseChangeStartPagePatch {
         }
 
         StartPage startPage = Settings.CHANGE_START_PAGE.get();
-        return processBrowseId(original, startPage.isBrowseId(), startPage.id, startPage.name());
+        return processBrowseId(original, TRUE.equals(startPage.isBrowseId), startPage.id, startPage.name());
+    }
+
+    /**
+     * Injection point.
+     * Only called for library pages that are not a Library tab root, such as Subscriptions.
+     * On cold start no root tab is active yet, and the first page that opens is the start page.
+     *
+     * @param activeRootTag The tag of the active root tab, or null if no root tab is active yet.
+     */
+    @Nullable
+    public static String overrideActiveRootTag(@Nullable String activeRootTag) {
+        if (activeRootTag == null && Settings.CHANGE_START_PAGE.get() == StartPage.SUBSCRIPTIONS) {
+            Logger.printDebug(() -> "Opening start page in the Library tab");
+            return StartPage.LIBRARY.id;
+        }
+
+        return activeRootTag;
     }
 
     public static void overrideIntentActionOnCreate(@NonNull Activity activity, @Nullable Bundle savedInstanceState) {

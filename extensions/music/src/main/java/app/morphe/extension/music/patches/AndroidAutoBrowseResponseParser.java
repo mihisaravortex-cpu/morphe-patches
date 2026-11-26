@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+@SuppressWarnings("unused")
 final class AndroidAutoBrowseResponseParser {
     // Protobuf field numbers for YTM's phone Home, Library, and search responses.
     private static final int BROWSE_CONTENTS = 9;
@@ -271,7 +272,8 @@ final class AndroidAutoBrowseResponseParser {
     }
 
     private static void readTopResult(List<BrowseItem> items, ProtoMessage topResult) {
-        addTopBrowseResult(items, topResult.messageField(TOP_RESULT_PRIMARY));
+        addRenderer(items, topResult.messageField(TOP_RESULT_PRIMARY), RESULT_TITLE, RESULT_SUBTITLE, RESULT_IMAGE,
+                TOP_RESULT_TAP, TOP_RESULT_MENU, true);
         for (ProtoMessage row : topResult.repeatedMessageField(TOP_RESULT_RELATED))
             addBrowseRow(items, row);
     }
@@ -305,10 +307,6 @@ final class AndroidAutoBrowseResponseParser {
 
     private static void addBrowseRow(List<BrowseItem> items, ProtoMessage renderer) {
         addRenderer(items, renderer, RESULT_TITLE, RESULT_SUBTITLE, RESULT_IMAGE, RESULT_TAP, RESULT_MENU, false);
-    }
-
-    private static void addTopBrowseResult(List<BrowseItem> items, ProtoMessage renderer) {
-        addRenderer(items, renderer, RESULT_TITLE, RESULT_SUBTITLE, RESULT_IMAGE, TOP_RESULT_TAP, TOP_RESULT_MENU, true);
     }
 
     /** Grid cards, result rows, and top results differ only in the field numbers of their contents. */

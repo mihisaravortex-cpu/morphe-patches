@@ -8,16 +8,14 @@
 package app.morphe.patches.youtube.video.series
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patcher.patch.resourcePatch
-import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patches.shared.misc.fix.proto.fixProtoLibraryPatch
 import app.morphe.patches.shared.misc.settings.preference.NonInteractivePreference
 import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference
 import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference.Sorting
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
-import app.morphe.patches.youtube.layout.buttons.navigation.navigationBarPatch
 import app.morphe.patches.youtube.layout.player.icons.copyPlayerButtonIcons
 import app.morphe.patches.youtube.layout.playlistautoplay.navigationIntentHook
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
@@ -36,14 +34,10 @@ import app.morphe.patches.youtube.video.information.PlayerInitFingerprint
 import app.morphe.patches.youtube.video.information.onCreateHook
 import app.morphe.patches.youtube.video.information.videoInformationPatch
 import app.morphe.patches.youtube.video.information.videoTimeHook
-import app.morphe.patches.youtube.video.videoid.VideoIdFingerprint
 import app.morphe.util.ResourceGroup
 import app.morphe.util.copyResources
-import com.android.tools.smali.dexlib2.AccessFlags
-import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
-import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import java.util.logging.Logger
 
 internal const val SERIES_TRACKER_EXTENSION_PREFIX = "Lapp/morphe/extension/youtube/series/"
@@ -54,7 +48,7 @@ private const val EXTENSION_PACKAGE = "app.morphe.extension.youtube.series"
 internal fun MethodReference.signature() =
     name + "(" + parameterTypes.joinToString("") + ")" + returnType
 
-private val seriesTrackerResourcesPatch = resourcePatch {
+private val seriesTrackerResourcesPatch = patch {
     dependsOn(legacyPlayerControlsResourcePatch)
 
     execute {
@@ -71,8 +65,7 @@ private val seriesTrackerResourcesPatch = resourcePatch {
     }
 }
 
-@Suppress("unused")
-val seriesTrackerPatch = bytecodePatch(
+val seriesTrackerPatch = patch(
     name = "Series tracking",
     description = "Adds a series library to History with local progress and episode continuation. " +
             "This patch works with YouTube 21.02 and newer.",
@@ -81,8 +74,8 @@ val seriesTrackerPatch = bytecodePatch(
         sharedExtensionPatch,
         settingsPatch,
         versionCheckPatch,
+        fixProtoLibraryPatch,
         videoInformationPatch,
-        navigationBarPatch,
         navigationBarHookPatch,
         seriesTrackerResourcesPatch,
         legacyPlayerControlsPatch,
@@ -133,48 +126,18 @@ val seriesTrackerPatch = bytecodePatch(
         )
 
         PlayerInitFingerprint.classDef.apply {
-            val idGetter = ControllerVideoIdFingerprint(
-                VideoIdFingerprint.instructionMatches.first().getMethodCalled()
-            ).originalMethod
+            val idGetter = ControllerVideoIdFingerprint.originalMethod
 
-            interfaces.add($$"$${SERIES_TRACKER_EXTENSION_PREFIX}PlaybackBridge$Source;")
-
-            fun addGetter(name: String, returnType: String, target: String, wide: Boolean) {
-                methods.add(
-                    ImmutableMethod(
-                        type,
-                        name,
-                        null,
-                        returnType,
-                        AccessFlags.PUBLIC.value,
-                        null,
-                        null,
-                        MutableMethodImplementation(if (wide) 3 else 2),
-                    ).toMutable().apply {
-                        val suffix = if (wide) "wide" else "object"
-                        addInstructions(
-                            0,
-                            """
-                                $target
-                                move-result-$suffix v0
-                                return-$suffix v0
-                            """
-                        )
-                    }
-                )
-            }
-
-            addGetter(
-                "patch_seriesTrackerVideoId",
-                "Ljava/lang/String;",
-                "invoke-virtual { p0 }, $idGetter",
-                false
-            )
-            addGetter(
+            val source = $$"$${SERIES_TRACKER_EXTENSION_PREFIX}PlaybackBridge$Source;"
+            addPatchInterface(source, "patch_seriesTrackerVideoId", idGetter)
+            addPatchInterface(
+                source,
                 "patch_seriesTrackerPosition",
-                "J",
-                "invoke-virtual { p0 }, $type->patch_getVideoTime()J",
-                true
+                """
+                    invoke-virtual { p0 }, $type->patch_getVideoTime()J
+                    move-result-wide v0
+                    return-wide v0
+                """
             )
         }
 

@@ -19,13 +19,33 @@ import app.morphe.patcher.checkCast
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.literal
 import app.morphe.patcher.methodCall
+import app.morphe.patcher.newInstance
 import app.morphe.patcher.opcode
 import app.morphe.patcher.parametersMatch
 import app.morphe.patcher.resource.ResourceType
 import app.morphe.patcher.resourceLiteral
 import app.morphe.patcher.string
+import app.morphe.patches.youtube.misc.navigation.ImageEnumConstructorFingerprint
+import app.morphe.patches.youtube.shared.ToolBarButtonFingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
+
+internal const val PIVOT_BAR_CLASS = "Lcom/google/android/libraries/youtube/rendering/ui/pivotbar/PivotBar;"
+
+internal object WatchLaterIconEnumFingerprint : Fingerprint(
+    classFingerprint = ImageEnumConstructorFingerprint,
+    filters = listOf(
+        string("WATCH_LATER"),
+        opcode(Opcode.SPUT_OBJECT, location = MatchAfterWithin(5))
+    )
+)
+
+internal object PivotBarItemBuilderFingerprint : Fingerprint(
+    definingClass = EXTENSION_CLASS,
+    name = "buildPivotBarItem",
+    returnType = "Ljava/lang/Object;",
+    parameters = listOf("[B")
+)
 
 private val SET_VISIBILITY_METHOD_CALL = methodCall(
     opcode = Opcode.INVOKE_VIRTUAL,
@@ -35,7 +55,7 @@ private val SET_VISIBILITY_METHOD_CALL = methodCall(
 internal object CreatePivotBarFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.CONSTRUCTOR),
     parameters = listOf(
-        "Lcom/google/android/libraries/youtube/rendering/ui/pivotbar/PivotBar;",
+        PIVOT_BAR_CLASS,
         "Landroid/widget/TextView;",
         "Ljava/lang/CharSequence;",
     ),
@@ -45,30 +65,16 @@ internal object CreatePivotBarFingerprint : Fingerprint(
     )
 )
 
-internal object CastMenuItemInitializeFingerprint : Fingerprint(
-    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
-    returnType = "V",
-    filters = listOf(
-        resourceLiteral(ResourceType.LAYOUT, "castmediaroutebutton"),
-        methodCall(name = "setShowAsAction")
-    )
-)
-
-internal object CastMenuItemVisibilityFingerprint : Fingerprint(
-    classFingerprint = CastMenuItemInitializeFingerprint,
-    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
-    returnType = "V",
-    filters = listOf(
-        methodCall(name = "setVisible")
-    )
-)
-
 internal object AnimatedNavigationTabsFeatureFlagFingerprint : Fingerprint(
     filters = listOf(
         literal(45680008L)
     )
 )
 
+/**
+ * The feed page sets with an enum of its response if the navigation bar hides while scrolling.
+ * The last match is the result of the enum conversion, and the navigation bar hides only if it is 2.
+ */
 internal object AutoHideNavigationBarOnFeedScrollingFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
@@ -78,37 +84,106 @@ internal object AutoHideNavigationBarOnFeedScrollingFingerprint : Fingerprint(
         methodCall(
             smali = "Landroid/view/ViewConfiguration;->getScaledTouchSlop()I",
             location = MatchAfterWithin(5)
-        )
+        ),
+        fieldAccess(opcode = Opcode.IGET, type = "I"),
+        methodCall(
+            opcode = Opcode.INVOKE_STATIC,
+            parameters = listOf("I"),
+            returnType = "I",
+            location = MatchAfterImmediately()
+        ),
+        opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately())
     )
 )
 
+/**
+ * Called by any list when it scrolls, before its scroll listeners are called.
+ */
+internal object ListScrolledFingerprint : Fingerprint(
+    definingClass = "Landroid/support/v7/widget/RecyclerView;",
+    returnType = "V",
+    parameters = listOf("I", "I"),
+    filters = listOf(
+        methodCall(smali = "Landroid/support/v7/widget/RecyclerView;->onScrollChanged(IIII)V")
+    )
+)
+
+/**
+ * Scroll listener of the AI search results, which hides the navigation bar through the bottom bar controller,
+ * and through the newer controller if the feature flag is on, whatever the page sets.
+ */
+internal object SearchResultsAutoHideNavigationBarFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf("Landroid/support/v7/widget/RecyclerView;", "I", "I"),
+    filters = listOf(
+        methodCall(smali = "Ljava/lang/Math;->abs(I)I"),
+        // Bottom bar controller, which is not called if null.
+        opcode(Opcode.CHECK_CAST),
+        opcode(Opcode.IF_EQZ, location = MatchAfterImmediately()),
+        methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            parameters = listOf("Z", "Z"),
+            returnType = "V",
+            location = MatchAfterImmediately()
+        ),
+        // Newer bottom bar controller.
+        literal(45649805L),
+        methodCall(returnType = "Z", location = MatchAfterImmediately()),
+        opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately()),
+        methodCall(opcode = Opcode.INVOKE_VIRTUAL, parameters = listOf("Z", "Z"), returnType = "V"),
+        // Header that follows the scroll.
+        fieldAccess(opcode = Opcode.SGET_OBJECT, type = "Landroid/util/Property;")
+    )
+)
+
+/**
+ * Enum of the views at the bottom of the screen, such as the navigation bar and the miniplayer.
+ * The app keeps the height of each of them, and places the other views above these heights.
+ */
+internal object BottomUiEnumFingerprint : Fingerprint(
+    name = "<clinit>",
+    filters = listOf(
+        string("PIVOT_BAR"),
+        string("BOTTOM_UI"),
+        string("MINI_PLAYER")
+    )
+)
+
+/**
+ * Sets the height of one of the views at the bottom of the screen.
+ */
+internal fun setBottomUiHeightFingerprint(bottomUiEnumType: String) = Fingerprint(
+    returnType = "V",
+    parameters = listOf(bottomUiEnumType, "I"),
+    filters = listOf(
+        methodCall(smali = "Ljava/util/EnumMap;->put(Ljava/lang/Enum;Ljava/lang/Object;)Ljava/lang/Object;")
+    )
+)
+
+/**
+ * Moves the navigation bar out of the screen while the miniplayer is dragged to be dismissed.
+ * Other listeners of the same drag cancel autoplay, so only the navigation bar listener is hooked.
+ * Before 21.23 the method of the navigation bar for this drag is empty.
+ */
 internal object AutoHideNavigationBarOnDismissMiniplayerFingerprint : Fingerprint(
-    accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.FINAL),
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
     parameters = listOf("F"),
     filters = listOf(
-        literal(2),
-        methodCall(
-            smali = "Ljava/lang/Integer;->valueOf(I)Ljava/lang/Integer;",
-            location = MatchAfterWithin(5)
-        ),
-        methodCall(
-            smali = "Ljava/util/Set;->iterator()Ljava/util/Iterator;",
-            location = MatchAfterWithin(5)
-        ),
-        methodCall(
-            smali = "Ljava/util/Iterator;->hasNext()Z",
-            location = MatchAfterWithin(5)
-        ),
-        methodCall(
-            smali = "Ljava/util/Iterator;->next()Ljava/lang/Object;",
-            location = MatchAfterWithin(5)
-        )
+        opcode(Opcode.IGET),
+        opcode(Opcode.IGET, location = MatchAfterImmediately()),
+        opcode(Opcode.ADD_INT_2ADDR, location = MatchAfterImmediately()),
+        opcode(Opcode.INT_TO_FLOAT, location = MatchAfterImmediately()),
+        opcode(Opcode.MUL_FLOAT_2ADDR, location = MatchAfterImmediately()),
+        opcode(Opcode.IPUT, location = MatchAfterImmediately()),
+        opcode(Opcode.INVOKE_VIRTUAL, location = MatchAfterImmediately()),
+        opcode(Opcode.RETURN_VOID, location = MatchAfterImmediately())
     )
 )
 
 internal object PivotBarStyleFingerprint : Fingerprint(
-    definingClass = "Lcom/google/android/libraries/youtube/rendering/ui/pivotbar/PivotBar;",
+    definingClass = PIVOT_BAR_CLASS,
     returnType = "V",
     parameters = listOf("L"),
     filters = OpcodesFilter.opcodesToFilters(
@@ -119,12 +194,23 @@ internal object PivotBarStyleFingerprint : Fingerprint(
 )
 
 internal object PivotBarChangedFingerprint : Fingerprint(
-    definingClass = "Lcom/google/android/libraries/youtube/rendering/ui/pivotbar/PivotBar;",
+    definingClass = PIVOT_BAR_CLASS,
     name = "onConfigurationChanged",
     returnType = "V",
     filters = OpcodesFilter.opcodesToFilters(
         Opcode.INVOKE_STATIC,
         Opcode.MOVE_RESULT
+    )
+)
+
+/**
+ * Adds the navigation bar height to the bottom room of the bar fixed at the bottom of some pages,
+ * such as the reply bar of the comment replies. Only read when the navigation bar covers
+ * the system navigation buttons. Not present in older targets.
+ */
+internal object CommentReplyPaddingFeatureFlagFingerprint : Fingerprint(
+    filters = listOf(
+        literal(45752241L)
     )
 )
 
@@ -135,9 +221,28 @@ internal object PivotBarChangedFingerprint : Fingerprint(
  */
 internal val TRANSLUCENT_NAVIGATION_BAR_FEATURE_FLAGS = listOf(
     45630927L, // Blurred, translucent background of the navigation bar.
-    45632194L, // Navigation bar also covers the system navigation buttons.
-    45631257L  // Feed laid out behind the navigation bar instead of above it.
+    NAVIGATION_BAR_COVERS_SYSTEM_BUTTONS_FLAG,
+    FEED_BEHIND_NAVIGATION_BAR_FLAG,
+    TRANSLUCENT_NAVIGATION_BAR_STYLE_FLAG
 )
+
+/**
+ * Navigation bar also covers the system navigation buttons, which adds the room for them
+ * to the navigation bar height.
+ */
+internal const val NAVIGATION_BAR_COVERS_SYSTEM_BUTTONS_FLAG = 45632194L
+
+/**
+ * Feed laid out behind the navigation bar instead of above it. The page then ends at the bottom
+ * of the screen, and its list gets the navigation bar height as bottom padding.
+ */
+internal const val FEED_BEHIND_NAVIGATION_BAR_FLAG = 45631257L
+
+/**
+ * Translucent style of the navigation bar before Android 12, which tells the pages that they can be seen
+ * through the bar, so they are laid out behind it. From Android 12 the blurred background tells it instead.
+ */
+internal const val TRANSLUCENT_NAVIGATION_BAR_STYLE_FLAG = 45633329L
 
 internal object TranslucentNavigationBarFeatureFlagsFingerprint : Fingerprint(
     filters = listOf(
@@ -148,61 +253,27 @@ internal object TranslucentNavigationBarFeatureFlagsFingerprint : Fingerprint(
 /**
  * Sets the bottom padding of the navigation bar to the bottom window inset, the room for
  * the system navigation buttons when the bar is drawn behind them. The bar height also grows
- * by the same value, which is first stored in a field of the bar.
+ * by the same value, which is first stored in a field of the bar and then added to its height.
  */
 internal object NavigationBarBottomPaddingFingerprint : Fingerprint(
     filters = listOf(
         fieldAccess(
             opcode = Opcode.IPUT,
-            definingClass = "Lcom/google/android/libraries/youtube/rendering/ui/pivotbar/PivotBar;",
+            definingClass = PIVOT_BAR_CLASS,
             type = "I"
         ),
+        // Sets the bar height to its content height and the room in the field.
         methodCall(
-            definingClass = "Lcom/google/android/libraries/youtube/rendering/ui/pivotbar/PivotBar;",
+            opcode = Opcode.INVOKE_VIRTUAL,
+            definingClass = PIVOT_BAR_CLASS,
+            parameters = listOf(),
+            returnType = "V",
+            location = MatchAfterImmediately()
+        ),
+        methodCall(
+            definingClass = PIVOT_BAR_CLASS,
             name = "setPadding",
             location = MatchAfterWithin(10)
-        )
-    )
-)
-
-/**
- * Sets the bottom margin of the layout that holds the page and the navigation bar.
- * With the keyboard open and a text field focused, the margin is the keyboard height,
- * otherwise the bottom of the window insets.
- */
-internal object PageBottomMarginFingerprint : Fingerprint(
-    returnType = "V",
-    parameters = listOf("Landroid/graphics/Rect;"),
-    filters = listOf(
-        methodCall(smali = "Landroid/view/View;->findFocus()Landroid/view/View;"),
-        methodCall(
-            smali = "Landroid/view/View;->onCheckIsTextEditor()Z",
-            location = MatchAfterWithin(5)
-        ),
-        fieldAccess(
-            opcode = Opcode.IGET,
-            definingClass = "Landroid/graphics/Rect;",
-            name = "bottom"
-        )
-    )
-)
-
-/**
- * Sets the padding of a feed list. When the feed is laid out behind the navigation bar,
- * the bottom padding holds the navigation bar height and the bottom window inset.
- */
-internal object FeedListPaddingFingerprint : Fingerprint(
-    returnType = "V",
-    parameters = listOf(),
-    filters = listOf(
-        methodCall(
-            definingClass = "Landroid/support/v7/widget/RecyclerView;",
-            name = "setClipToPadding"
-        ),
-        methodCall(
-            definingClass = "Landroid/support/v7/widget/RecyclerView;",
-            name = "setPadding",
-            location = MatchAfterImmediately()
         )
     )
 )
@@ -225,6 +296,41 @@ internal object NavigationBarBlurDrawFingerprint : Fingerprint(
         methodCall(smali = "Landroid/graphics/Canvas;->isHardwareAccelerated()Z"),
         opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately()),
         methodCall(smali = "Landroid/view/View;->draw(Landroid/graphics/Canvas;)V")
+    )
+)
+
+/**
+ * Gives the blurred background of the navigation bar its tint color, read from the theme.
+ * The last filter calls the method that makes the tint paint, [NavigationBarBlurTintFingerprint].
+ */
+internal object NavigationBarBlurTintCallFingerprint : Fingerprint(
+    definingClass = PIVOT_BAR_CLASS,
+    filters = listOf(
+        methodCall(smali = "Landroid/content/res/TypedArray;->getColor(II)I"),
+        opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately()),
+        methodCall(
+            opcode = Opcode.INVOKE_VIRTUAL,
+            parameters = listOf("I"),
+            returnType = "V",
+            location = MatchAfterImmediately()
+        ),
+        methodCall(
+            smali = "$PIVOT_BAR_CLASS->setBackground(Landroid/graphics/drawable/Drawable;)V",
+            location = MatchAfterWithin(3)
+        )
+    )
+)
+
+/**
+ * Makes the tint paint of the blurred background of the navigation bar, drawn over the blur.
+ * Resolved against the method called by [NavigationBarBlurTintCallFingerprint].
+ */
+internal object NavigationBarBlurTintFingerprint : Fingerprint(
+    returnType = "V",
+    parameters = listOf("I"),
+    filters = listOf(
+        methodCall(smali = "Landroid/graphics/Paint;->setColor(I)V"),
+        methodCall(smali = "Landroid/graphics/Paint;->setAlpha(I)V", location = MatchAfterWithin(4))
     )
 )
 
@@ -321,6 +427,203 @@ internal object PivotBarRendererFingerprint : Fingerprint(
     )
 )
 
+/**
+ * Same method as [PivotBarRendererFingerprint].
+ * Matches the renderer of the navigation buttons without labels.
+ */
+internal object PivotBarIconOnlyRendererFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
+    parameters = listOf("L"),
+    returnType = "Lj$/util/Optional;",
+    filters = listOf(
+        literal(117501096L),
+        literal(318370163L),
+        opcode(Opcode.IF_NE, location = MatchAfterWithin(3)),
+        opcode(Opcode.CHECK_CAST, location = MatchAfterWithin(6)),
+        // The button without a label.
+        methodCall(
+            opcode = Opcode.INVOKE_DIRECT_RANGE,
+            definingClass = "this",
+            name = "<init>",
+            returnType = "V"
+        )
+    )
+)
+
+/**
+ * Order of a toolbar button in the menu of the toolbar.
+ */
+internal object ToolBarButtonOrderFingerprint : Fingerprint(
+    classFingerprint = ToolBarButtonFingerprint,
+    returnType = "I",
+    parameters = listOf(),
+    filters = listOf(
+        literal(1000L)
+    )
+)
+
+internal object ToolbarCastMenuItemInitializeFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    filters = listOf(
+        resourceLiteral(ResourceType.LAYOUT, "castmediaroutebutton"),
+        methodCall(name = "setShowAsAction")
+    )
+)
+
+internal object ToolbarCastMenuItemVisibilityFingerprint : Fingerprint(
+    classFingerprint = ToolbarCastMenuItemInitializeFingerprint,
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    filters = listOf(
+        methodCall(name = "setVisible")
+    )
+)
+
+/**
+ * The toolbar Cast button is shown only when the cast icon awareness allows it, such as with a cast device nearby.
+ * Two experiments of the same feature, each read with the other. The flags are also read by the Companion button
+ * and by the awareness itself, which are not matched.
+ * 21.30+
+ */
+internal object ToolbarCastButtonAwarenessFeatureFlagFingerprint : Fingerprint(
+    classFingerprint = ToolbarCastMenuItemInitializeFingerprint,
+    filters = listOf(
+        literal(45759129L)
+    )
+)
+
+internal object ToolbarCastButtonAwarenessAlternateFeatureFlagFingerprint : Fingerprint(
+    classFingerprint = ToolbarCastMenuItemInitializeFingerprint,
+    filters = listOf(
+        literal(45758238L)
+    )
+)
+
+/**
+ * Chooses the toolbar Cast button: the Cast button, or the Companion button, see [ToolbarCompanionButtonFingerprint].
+ * The first parameter is the provider of the Cast button, and the second of the Companion button.
+ * The providers give the button with the matched method call.
+ * 21.45+
+ */
+internal object ToolbarCastButtonSelectionFingerprint : Fingerprint(
+    parameters = listOf("L", "L", "L"),
+    filters = listOf(
+        literal(45826964L),
+        literal(45690090L),
+        methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            parameters = listOf(),
+            returnType = "Ljava/lang/Object;"
+        )
+    )
+)
+
+/**
+ * Sets the view of the toolbar Cast button: the media route button, or the entry point button,
+ * which shows the companion icon with the cast icon awareness.
+ * 21.30+
+ */
+internal object ToolbarCastButtonViewFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    filters = listOf(
+        literal(45690090L),
+        resourceLiteral(ResourceType.LAYOUT, "castmediaroutebutton"),
+        methodCall(name = "setShowAsAction")
+    )
+)
+
+/**
+ * The entry point button of the toolbar Cast button. The code that connects the toolbar Cast button
+ * to the cast devices calls it after the same flag as [ToolbarCastButtonViewFingerprint].
+ */
+internal object ToolbarCastEntryPointButtonFingerprint : Fingerprint(
+    parameters = listOf("Landroid/view/MenuItem;"),
+    filters = listOf(
+        methodCall(name = "getActionView"),
+        checkCast("Lcom/google/android/libraries/youtube/mdx/mediaroute/entrypoint/MdxEntryPointButton;")
+    )
+)
+
+/**
+ * The code that connects the toolbar Cast button to the cast devices. It reads the flag again,
+ * to know if the view of the button is the entry point button, see [ToolbarCastButtonViewFingerprint].
+ * 21.30+
+ */
+internal object ToolbarCastButtonConnectionFingerprint : Fingerprint(
+    filters = listOf(
+        literal(45690090L),
+        methodCall(reference = { ToolbarCastEntryPointButtonFingerprint.method })
+    )
+)
+
+/**
+ * The toolbar button that only opens the companion of the watch page, which the app adds instead of the Cast button.
+ * 21.45+
+ */
+internal object ToolbarCompanionButtonFingerprint : Fingerprint(
+    returnType = "V",
+    parameters = listOf("Landroid/view/MenuItem;", "Landroid/content/Context;"),
+    filters = listOf(
+        newInstance("Landroid/support/v7/widget/AppCompatImageButton;"),
+        resourceLiteral(ResourceType.STRING, "mdx_accessibility_cast_entry_point_name"),
+        methodCall(name = "setActionView")
+    )
+)
+
+/**
+ * The id of the Companion button, which is the id of the Cast button.
+ */
+internal object ToolbarCompanionButtonIdFingerprint : Fingerprint(
+    classFingerprint = ToolbarCompanionButtonFingerprint,
+    returnType = "I",
+    parameters = listOf(),
+    filters = listOf(
+        resourceLiteral(ResourceType.ID, "menu_cast")
+    )
+)
+
+/**
+ * Adds the buttons to the menu of a toolbar. The buttons are kept by their id.
+ */
+internal object ToolbarMenuCreateFingerprint : Fingerprint(
+    returnType = "V",
+    parameters = listOf(
+        "Landroid/view/Menu;",
+        "Landroid/view/MenuInflater;",
+        "L",
+        "Landroid/util/SparseArray;",
+        "I",
+        "Landroid/content/Context;"
+    ),
+    filters = listOf(
+        string("Unhandled menu item %s")
+    )
+)
+
+/**
+ * The view of the toolbar Cast button, which the controller of the cast devices hides while casting
+ * is not available. The method is final, so it is changed and not overridden by the subclass of the app.
+ */
+internal object MediaRouteButtonSetVisibilityFingerprint : Fingerprint(
+    definingClass = "Landroidx/mediarouter/app/MediaRouteButton;",
+    name = "setVisibility",
+    returnType = "V",
+    parameters = listOf("I")
+)
+
+/**
+ * With the cast icon awareness, the media route button opens the companion of the watch page
+ * instead of the cast devices. 21.30+, and its second flag 21.45+.
+ */
+internal object MediaRouteButtonClickFingerprint : Fingerprint(
+    definingClass = "Lcom/google/android/libraries/youtube/mdx/mediaroute/MdxMediaRouteButton;",
+    name = "performClick",
+    returnType = "Z",
+    parameters = listOf()
+)
+
 internal object PivotBarRendererListFingerprint : Fingerprint(
     parameters = listOf("L"),
     returnType = "V",
@@ -340,7 +643,8 @@ internal object PivotBarRendererListFingerprint : Fingerprint(
             definingClass = "this",
             type = "L"
         ),
-        literal(45633821L),
+        // The new list is compared to the previous list.
+        methodCall(smali = "Ljava/lang/Class;->isInstance(Ljava/lang/Object;)Z")
     )
 )
 

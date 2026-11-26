@@ -14,7 +14,6 @@ import android.app.Application;
 import android.content.Context;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
-import android.preference.SwitchPreference;
 import android.util.AttributeSet;
 
 import androidx.annotation.NonNull;
@@ -24,7 +23,7 @@ import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.settings.SharedYouTubeSettings;
 
 @SuppressWarnings({"deprecation", "unused"})
-public class ExternalPoTokenProviderPreference extends SwitchPreference {
+public class ExternalPoTokenProviderPreference extends BooleanSettingPreference {
 
     /**
      * Callback when the app is resumed. Used to enable preference switch after helper is installed.
@@ -45,28 +44,20 @@ public class ExternalPoTokenProviderPreference extends SwitchPreference {
         public void onActivityDestroyed(@NonNull Activity a) {}
     };
 
-    private void registerApplicationOnResumeCallback() {
+    @Override
+    protected void onAttachedToHierarchy(PreferenceManager preferenceManager) {
+        super.onAttachedToHierarchy(preferenceManager);
         ((Application) getContext().getApplicationContext()).registerActivityLifecycleCallbacks(
                 ACTIVITY_LIFECYCLE_CALLBACKS
         );
     }
 
-    private void unregisterApplicationOnResumeCallback() {
-        ((Application) getContext().getApplicationContext()).unregisterActivityLifecycleCallbacks(
-                ACTIVITY_LIFECYCLE_CALLBACKS
-        );
-    }
-
-    @Override
-    protected void onAttachedToHierarchy(PreferenceManager preferenceManager) {
-        super.onAttachedToHierarchy(preferenceManager);
-        registerApplicationOnResumeCallback();
-    }
-
     @Override
     protected void onPrepareForRemoval() {
         super.onPrepareForRemoval();
-        unregisterApplicationOnResumeCallback();
+        ((Application) getContext().getApplicationContext()).unregisterActivityLifecycleCallbacks(
+                ACTIVITY_LIFECYCLE_CALLBACKS
+        );
     }
 
     @Override

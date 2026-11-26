@@ -10,8 +10,11 @@ package app.morphe.extension.music.patches.lyrics.model;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+
+import app.morphe.extension.music.patches.lyrics.romanizers.ScriptDetector;
 
 /**
  * A single lyrics line.
@@ -33,8 +36,50 @@ public record LyricsLine(long startTimeMs, long endTimeMs, String text, List<Wor
     public static final long NO_TIME = -1;
 
     public LyricsLine {
-        words = words == null ? List.of() : Collections.unmodifiableList(words);
+        words = words == null ? List.of() : words;
         text = text == null ? "" : text;
+        if (words.size() > 1 && !ScriptDetector.contains(text, Character.UnicodeScript.HAN,
+                Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA)) {
+            boolean hasEndedWithSpace = false;
+            for (Word w : words) {
+                if (w.endsWithSpace()) {
+                    hasEndedWithSpace = true;
+                    break;
+                }
+            }
+            if (text.indexOf(' ') < 0) {
+                if (hasEndedWithSpace) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < words.size(); i++) {
+                        Word w = words.get(i);
+                        sb.append(w.text());
+                        if (w.endsWithSpace() && i < words.size() - 1) {
+                            sb.append(' ');
+                        }
+                    }
+                    text = sb.toString();
+                }
+            } else if (!hasEndedWithSpace) {
+                List<Word> updated = new ArrayList<>(words.size());
+                int cursor = 0;
+                for (int i = 0; i < words.size(); i++) {
+                    Word w = words.get(i);
+                    int idx = text.indexOf(w.text(), cursor);
+                    boolean sp;
+                    if (idx >= 0) {
+                        int end = idx + w.text().length();
+                        sp = (end < text.length() && Character.isWhitespace(text.charAt(end)));
+                        cursor = end;
+                    } else {
+                        // CJK words are written without spaces, so only other words can assume one.
+                        sp = i < words.size() - 1 && !ScriptDetector.containsCjk(w.text());
+                    }
+                    updated.add(new Word(w.startMs(), w.endMs(), w.text(), w.romaji(), sp, w.ruby()));
+                }
+                words = updated;
+            }
+        }
+        words = Collections.unmodifiableList(words);
     }
 
     public LyricsLine(long startTimeMs, String text, List<Word> words,
@@ -54,8 +99,41 @@ public record LyricsLine(long startTimeMs, long endTimeMs, String text, List<Wor
         this(startTimeMs, NO_TIME, text, List.of(), null, false, false, null);
     }
 
+    public static boolean isCenteredAgentId(@Nullable String agentId) {
+        if (agentId == null) {
+            return false;
+        }
+        final String id = agentId.trim();
+        return "v1000".equalsIgnoreCase(id) || "v2000".equalsIgnoreCase(id);
+    }
+
+    private static String compactText(String value) {
+        final StringBuilder builder = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            final char c = value.charAt(i);
+            if (!Character.isWhitespace(c)) {
+                builder.append(c);
+            }
+        }
+        return builder.toString();
+    }
+
     public boolean hasWords() {
         return !words.isEmpty();
+    }
+
+    /** {@return the later of the line's end and its last word's end, or NO_TIME without either} */
+    public long sungEndMs() {
+        final long wordEnd = words.isEmpty() ? NO_TIME : words.get(words.size() - 1).endMs();
+        if (wordEnd == NO_TIME) {
+            return endTimeMs;
+        }
+        return endTimeMs == NO_TIME ? wordEnd : Math.max(wordEnd, endTimeMs);
+    }
+
+    /** Whether Apple's group/other vocal agent is centered instead of placed on a duet side. */
+    public boolean isCentered() {
+        return isCenteredAgentId(agentId);
     }
 
     /**
@@ -72,29 +150,25 @@ public record LyricsLine(long startTimeMs, long endTimeMs, String text, List<Wor
         }
         if (words.size() == 1) {
             Word single = words.get(0);
-            if (isWholeLineWord(single.text(), text)) {
-                return false;
-            }
             if (single.endMs() <= single.startMs()) {
                 return false;
             }
+            if (compactText(single.text()).equalsIgnoreCase(compactText(text))) {
+                // Same text: word sync only when the word carries its own span, not the line's.
+                return single.startMs() != startTimeMs || single.endMs() != endTimeMs;
+            }
+            // Different text: the word covers only part of the line, so it is word sync.
+            return true;
         }
-        return true;
-    }
-
-    private static boolean isWholeLineWord(String wordText, String lineText) {
-        return compactText(wordText).equalsIgnoreCase(compactText(lineText));
-    }
-
-    private static String compactText(String value) {
-        final StringBuilder builder = new StringBuilder(value.length());
-        for (int i = 0; i < value.length(); i++) {
-            final char c = value.charAt(i);
-            if (!Character.isWhitespace(c)) {
-                builder.append(c);
+        for (Word word : words) {
+            if (word.endMs() <= word.startMs()) {
+                continue;
+            }
+            if (word.startMs() != startTimeMs || word.endMs() != endTimeMs) {
+                return true;
             }
         }
-        return builder.toString();
+        return false;
     }
 
     @NonNull

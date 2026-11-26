@@ -22,10 +22,130 @@ import java.util.Map;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.requests.Requester;
+import app.morphe.extension.shared.requests.Route;
 
 public class GetPlaylistItemsRequest {
 
+    /**
+     * A playlist has at most 5000 videos, and a page after the first has 60 videos.
+     */
+    private static final int MAX_PLAYLIST_PAGES = 100;
+
     private GetPlaylistItemsRequest() {
+    }
+
+    /**
+     * @return The ids of the videos of all the pages of the playlist, with the id of their entry in the
+     *         playlist if it's known, or null if the request failed. Only a failure of the first page
+     *         returns null, as the videos of the other pages are still valid.
+     */
+    @Nullable
+    public static Map<String, String> fetchVideoIds(String playlistId, Map<String, String> requestHeader) {
+        Utils.verifyOffMainThread();
+        final long startTime = System.currentTimeMillis();
+
+        try {
+            Map<String, String> videos = new HashMap<>();
+            final PagesResult result = fetchPages(PlaylistRoutes.BROWSE_PLAYLIST_VIDEO_IDS, playlistId, requestHeader,
+                    (response, page) -> {
+                        JSONArray contents = page.optJSONArray("contents");
+                        if (contents != null) {
+                            for (int j = 0, length = contents.length(); j < length; j++) {
+                                JSONObject element = contents.optJSONObject(j);
+                                JSONObject renderer = element == null ? null : element.optJSONObject("playlistVideoRenderer");
+                                String videoId = renderer == null ? "" : renderer.optString("videoId");
+                                if (!videoId.isEmpty()) {
+                                    videos.put(videoId, renderer.optString("setVideoId"));
+                                }
+                            }
+                        }
+                        return true;
+                    });
+            if (result == PagesResult.FAILED) {
+                return null;
+            }
+            Logger.printDebug(() -> "Fetched " + videos.size() + " video ids of playlist: " + playlistId);
+            return videos;
+        } catch (SocketTimeoutException ex) {
+            Logger.printInfo(() -> "Connection timeout", ex);
+        } catch (IOException ex) {
+            Logger.printInfo(() -> "Network error", ex);
+        } catch (Exception ex) {
+            Logger.printException(() -> "fetchVideoIds failed", ex);
+        } finally {
+            Logger.printDebug(() -> "playlist video ids fetch took: " + (System.currentTimeMillis() - startTime) + "ms");
+        }
+        return null;
+    }
+
+    enum PagesResult {
+        /** The first page could not be fetched. */
+        FAILED,
+        /** A page after the first could not be fetched, or the callback stopped the pages. */
+        PARTIAL,
+        COMPLETE
+    }
+
+    interface PageCallback {
+        /**
+         * @param response Response the page is in. The response of the first page has the header of the playlist.
+         * @param page     Renderer of the page, with the videos of the page in its contents.
+         * @return Whether to fetch the next page.
+         */
+        boolean onPage(JSONObject response, JSONObject page);
+    }
+
+    /**
+     * Fetches the pages of the videos of a playlist one after the other.
+     *
+     * @param route Browse route, whose field mask keeps the playlist video list renderers and their continuations.
+     * @return Whether all pages were fetched. A page after the first that fails only stops the pages,
+     *         as the videos of the pages before it are still valid.
+     */
+    static PagesResult fetchPages(Route.CompiledRoute route, String playlistId, Map<String, String> requestHeader,
+                                  PageCallback callback) throws IOException, JSONException {
+        JSONObject response = sendRequest(route, PlaylistRoutes.browsePlaylistBody(playlistId), requestHeader);
+        if (response == null) {
+            return PagesResult.FAILED;
+        }
+
+        JSONObject page = findPlaylistRenderer(response);
+        for (int i = 0; page != null && i < MAX_PLAYLIST_PAGES; i++) {
+            if (!callback.onPage(response, page)) {
+                return PagesResult.PARTIAL;
+            }
+
+            JSONArray continuations = page.optJSONArray("continuations");
+            if (continuations == null || continuations.length() == 0) {
+                break;
+            }
+            response = sendRequest(route,
+                    PlaylistRoutes.browseContinuationBody(continuations.getJSONObject(0)
+                            .getJSONObject("nextContinuationData").getString("continuation")),
+                    requestHeader);
+            if (response == null) {
+                return PagesResult.PARTIAL;
+            }
+            JSONObject continuationContents = response.optJSONObject("continuationContents");
+            page = continuationContents == null
+                    ? null
+                    : continuationContents.optJSONObject("playlistVideoListContinuation");
+        }
+        return PagesResult.COMPLETE;
+    }
+
+    @Nullable
+    private static JSONObject sendRequest(Route.CompiledRoute route, byte[] requestBody, Map<String, String> requestHeader)
+            throws IOException, JSONException {
+        HttpURLConnection connection = PlaylistRoutes.getConnection(route, requestHeader);
+        connection.setFixedLengthStreamingMode(requestBody.length);
+        connection.getOutputStream().write(requestBody);
+        final int responseCode = connection.getResponseCode();
+        if (responseCode == Requester.HTTP_STATUS_CODE_SUCCESS) {
+            return Requester.parseJSONObject(connection);
+        }
+        Logger.printInfo(() -> "Browse playlist failed with code: " + responseCode);
+        return null;
     }
 
     @Nullable
@@ -35,16 +155,11 @@ public class GetPlaylistItemsRequest {
         Logger.printDebug(() -> "Fetching playlist items for: " + playlistId);
 
         try {
-            byte[] requestBody = PlaylistRoutes.browsePlaylistBody(playlistId);
-            HttpURLConnection connection = PlaylistRoutes.getConnection(PlaylistRoutes.BROWSE_PLAYLIST, requestHeader);
-            connection.setFixedLengthStreamingMode(requestBody.length);
-            connection.getOutputStream().write(requestBody);
-            final int responseCode = connection.getResponseCode();
-            if (responseCode == Requester.HTTP_STATUS_CODE_SUCCESS) {
-                JSONObject json = Requester.parseJSONObject(connection);
+            JSONObject json = sendRequest(PlaylistRoutes.BROWSE_PLAYLIST,
+                    PlaylistRoutes.browsePlaylistBody(playlistId), requestHeader);
+            if (json != null) {
                 return parseResponse(json);
             }
-            Logger.printInfo(() -> "Browse playlist failed with code: " + responseCode);
         } catch (SocketTimeoutException ex) {
             Logger.printInfo(() -> "Connection timeout", ex);
         } catch (IOException ex) {
@@ -57,19 +172,43 @@ public class GetPlaylistItemsRequest {
         return null;
     }
 
+    /**
+     * @return The renderer of the first page of the videos, or null if the playlist has no videos.
+     */
     @Nullable
-    private static JSONArray findPlaylistContents(JSONArray sectionContents) throws JSONException {
+    private static JSONObject findPlaylistRenderer(JSONObject json) throws JSONException {
+        JSONObject contents = json.optJSONObject("contents");
+        if (contents == null) {
+            Logger.printDebug(() -> "JSON contents are missing, cannot parse response");
+            return null;
+        }
+        JSONObject columnRenderer = contents.optJSONObject("singleColumnBrowseResultsRenderer");
+        if (columnRenderer == null) {
+            columnRenderer = contents.optJSONObject("twoColumnBrowseResultsRenderer");
+        }
+        if (columnRenderer == null) {
+            return null;
+        }
+
+        JSONArray sectionContents = columnRenderer
+                .getJSONArray("tabs")
+                .getJSONObject(0)
+                .getJSONObject("tabRenderer")
+                .getJSONObject("content")
+                .getJSONObject("sectionListRenderer")
+                .getJSONArray("contents");
+
         for (int i = 0, length = sectionContents.length(); i < length; i++) {
             JSONObject section = sectionContents.getJSONObject(i);
             if (section.has("playlistVideoListRenderer")) {
-                return section.getJSONObject("playlistVideoListRenderer").getJSONArray("contents");
+                return section.getJSONObject("playlistVideoListRenderer");
             }
             if (section.has("itemSectionRenderer")) {
                 JSONArray inner = section.getJSONObject("itemSectionRenderer").getJSONArray("contents");
                 for (int j = 0, innerLength = inner.length(); j < innerLength; j++) {
                     JSONObject innerItem = inner.getJSONObject(j);
                     if (innerItem.has("playlistVideoListRenderer")) {
-                        return innerItem.getJSONObject("playlistVideoListRenderer").getJSONArray("contents");
+                        return innerItem.getJSONObject("playlistVideoListRenderer");
                     }
                 }
             }
@@ -80,28 +219,8 @@ public class GetPlaylistItemsRequest {
     @Nullable
     private static Map<String, String> parseResponse(JSONObject json) {
         try {
-            if (!json.has("contents")) {
-                Logger.printDebug(() -> "JSON contents are missing, cannot parse response");
-                return null;
-            }
-            JSONObject contents = json.getJSONObject("contents");
-            JSONObject columnRenderer = contents.optJSONObject("singleColumnBrowseResultsRenderer");
-            if (columnRenderer == null) {
-                columnRenderer = contents.optJSONObject("twoColumnBrowseResultsRenderer");
-            }
-            if (columnRenderer == null) {
-                return null;
-            }
-
-            JSONArray sectionContents = columnRenderer
-                    .getJSONArray("tabs")
-                    .getJSONObject(0)
-                    .getJSONObject("tabRenderer")
-                    .getJSONObject("content")
-                    .getJSONObject("sectionListRenderer")
-                    .getJSONArray("contents");
-
-            JSONArray playlistContents = findPlaylistContents(sectionContents);
+            JSONObject playlistRenderer = findPlaylistRenderer(json);
+            JSONArray playlistContents = playlistRenderer == null ? null : playlistRenderer.getJSONArray("contents");
             if (playlistContents == null) {
                 return null;
             }

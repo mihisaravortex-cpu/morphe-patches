@@ -31,6 +31,7 @@ import app.morphe.extension.shared.ui.CustomDialog;
 /**
  * Manager for search history functionality.
  */
+@SuppressWarnings("unused")
 public class SearchHistoryManager {
     /**
      * Interface for handling history item selection.
@@ -51,6 +52,8 @@ public class SearchHistoryManager {
             ResourceType.ID, "empty_history_summary");
     private static final int ID_SEARCH_HISTORY_HEADER = ResourceUtils.getIdentifierOrThrow(
             ResourceType.ID, "search_history_header");
+    private static final int ID_SEARCH_TIPS_TITLE = ResourceUtils.getIdentifierOrThrow(
+            ResourceType.ID, "morphe_settings_search_tips_title");
     private static final int ID_SEARCH_TIPS_SUMMARY = ResourceUtils.getIdentifierOrThrow(
             ResourceType.ID, "morphe_settings_search_tips_summary");
     private static final int LAYOUT_MORPHE_PREFERENCE_SEARCH_HISTORY_SCREEN = ResourceUtils.getIdentifierOrThrow(
@@ -133,13 +136,19 @@ public class SearchHistoryManager {
 
         // Set up clear history button.
         TextView clearHistoryButton = searchHistoryContainer.findViewById(ID_CLEAR_HISTORY_BUTTON);
+        clearHistoryButton.setText(str("morphe_settings_search_clear_history"));
         clearHistoryButton.setOnClickListener(v -> createAndShowDialog(
                 str("morphe_settings_search_clear_history"),
                 str("morphe_settings_search_clear_history_message"),
                 this::clearAllSearchHistory
         ));
 
-        // Set up search tips summary.
+        TextView historyHeader = searchHistoryContainer.findViewById(ID_SEARCH_HISTORY_HEADER);
+        historyHeader.setText(str("morphe_settings_search_recent_searches"));
+
+        // Set up search tips.
+        TextView tipsTitle = historyView.findViewById(ID_SEARCH_TIPS_TITLE);
+        tipsTitle.setText(str("morphe_settings_search_tips_title"));
         CharSequence text = BulletPointPreference.formatIntoBulletPoints(
                 str("morphe_settings_search_tips_summary"));
         TextView tipsSummary = historyView.findViewById(ID_SEARCH_TIPS_SUMMARY);
@@ -163,12 +172,20 @@ public class SearchHistoryManager {
 
         if (searchHistory.isEmpty()) {
             // Show empty history state.
-            showEmptyHistoryViews(emptyHistoryTitle, emptyHistorySummary);
-            hideHistoryViews(historyHeader, historyList, clearHistoryButton);
+            emptyHistoryTitle.setVisibility(View.VISIBLE);
+            emptyHistoryTitle.setText(str("morphe_settings_search_empty_history_title"));
+            emptyHistorySummary.setVisibility(View.VISIBLE);
+            emptyHistorySummary.setText(str("morphe_settings_search_empty_history_summary"));
+            historyHeader.setVisibility(View.GONE);
+            historyList.setVisibility(View.GONE);
+            clearHistoryButton.setVisibility(View.GONE);
         } else {
             // Show history list state.
-            hideEmptyHistoryViews(emptyHistoryTitle, emptyHistorySummary);
-            showHistoryViews(historyHeader, historyList, clearHistoryButton);
+            emptyHistoryTitle.setVisibility(View.GONE);
+            emptyHistorySummary.setVisibility(View.GONE);
+            historyHeader.setVisibility(View.VISIBLE);
+            historyList.setVisibility(View.VISIBLE);
+            clearHistoryButton.setVisibility(View.VISIBLE);
 
             // Update adapter with current history.
             searchHistoryAdapter.clear();
@@ -177,7 +194,7 @@ public class SearchHistoryManager {
         }
 
         // Show the search history container.
-        showSearchHistoryContainer();
+        searchHistoryContainer.setVisibility(View.VISIBLE);
     }
 
     /**
@@ -207,14 +224,6 @@ public class SearchHistoryManager {
     }
 
     /**
-     * Removes a search query from the history.
-     */
-    public void removeSearchQuery(String query) {
-        searchHistory.remove(query);
-        saveSearchHistory();
-    }
-
-    /**
      * Clears all search history.
      */
     public void clearAllSearchHistory() {
@@ -232,54 +241,12 @@ public class SearchHistoryManager {
         return showSettingsSearchHistory;
     }
 
-    /**
-     * Shows the search history container and overlay.
-     */
-    public void showSearchHistoryContainer() {
-        searchHistoryContainer.setVisibility(View.VISIBLE);
-    }
 
     /**
      * Hides the search history container.
      */
     public void hideSearchHistoryContainer() {
         searchHistoryContainer.setVisibility(View.GONE);
-    }
-
-    /**
-     * Helper method to show empty history views.
-     */
-    protected void showEmptyHistoryViews(TextView emptyTitle, TextView emptySummary) {
-        emptyTitle.setVisibility(View.VISIBLE);
-        emptyTitle.setText(str("morphe_settings_search_empty_history_title"));
-        emptySummary.setVisibility(View.VISIBLE);
-        emptySummary.setText(str("morphe_settings_search_empty_history_summary"));
-    }
-
-    /**
-     * Helper method to hide empty history views.
-     */
-    protected void hideEmptyHistoryViews(TextView emptyTitle, TextView emptySummary) {
-        emptyTitle.setVisibility(View.GONE);
-        emptySummary.setVisibility(View.GONE);
-    }
-
-    /**
-     * Helper method to show history list views.
-     */
-    protected void showHistoryViews(TextView header, LinearLayout list, TextView clearButton) {
-        header.setVisibility(View.VISIBLE);
-        list.setVisibility(View.VISIBLE);
-        clearButton.setVisibility(View.VISIBLE);
-    }
-
-    /**
-     * Helper method to hide history list views.
-     */
-    protected void hideHistoryViews(TextView header, LinearLayout list, TextView clearButton) {
-        header.setVisibility(View.GONE);
-        list.setVisibility(View.GONE);
-        clearButton.setVisibility(View.GONE);
     }
 
     /**
@@ -360,7 +327,8 @@ public class SearchHistoryManager {
                         query,
                         str("morphe_settings_search_remove_message"),
                         () -> {
-                            removeSearchQuery(query);
+                            searchHistory.remove(query);
+                            saveSearchHistory();
                             remove(query);
                             notifyDataSetChanged();
                         }

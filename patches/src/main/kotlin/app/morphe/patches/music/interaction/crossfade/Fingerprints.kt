@@ -9,7 +9,9 @@
 package app.morphe.patches.music.interaction.crossfade
 
 import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.StringComparisonType
+import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
 import app.morphe.patcher.string
@@ -32,6 +34,19 @@ internal object PlayNextInQueueFingerprint : Fingerprint(
     strings = listOf("gapless.seek.next", "playNextInQueue.")
 )
 
+/**
+ * Sets the player volume, which includes the app's volume normalization, and stores it in a field.
+ */
+internal object PlayerVolumeFingerprint : Fingerprint(
+    classFingerprint = PlayNextInQueueFingerprint,
+    returnType = "V",
+    parameters = listOf("F"),
+    filters = listOf(
+        methodCall(definingClass = EXO_PLAYER_TYPE, returnType = "V", parameters = listOf("F")),
+        fieldAccess(opcode = Opcode.IPUT, type = "F", location = MatchAfterImmediately())
+    )
+)
+
 internal object AudioVideoToggleFingerprint : Fingerprint(
     returnType = "V",
     strings = listOf("Failed to update user last selected audio")
@@ -51,10 +66,11 @@ internal object PlayVideoFingerprint : Fingerprint(
 
 /**
  * A synthetic Runnable also logs with the "ExoPlayerImpl" tag, so the interface check is required.
+ * Matches seekTo, since newer app versions log with this tag in more than one method.
  */
 internal object ExoPlayerImplFingerprint : Fingerprint(
     interfaces = listOf(EXO_PLAYER_TYPE),
-    strings = listOf("ExoPlayerImpl")
+    strings = listOf("ExoPlayerImpl", "seekTo ignored because an ad is playing")
 )
 
 internal object LoadVideoFingerprint : Fingerprint(
@@ -101,4 +117,22 @@ internal object HandleDismissWatchEventFingerprint : Fingerprint(
 internal object SleepTimerStateFingerprint : Fingerprint(
     name = "<clinit>",
     strings = listOf("INACTIVE", "ACTIVE_TIMER", "ACTIVE_END_OF_TRACK")
+)
+
+internal object AudioEffectSessionFingerprint : Fingerprint(
+    name = "<init>",
+    strings = listOf(
+        "android.media.action.OPEN_AUDIO_EFFECT_CONTROL_SESSION",
+        "android.media.action.CLOSE_AUDIO_EFFECT_CONTROL_SESSION"
+    )
+)
+
+internal object CloseAudioEffectSessionFingerprint : Fingerprint(
+    classFingerprint = AudioEffectSessionFingerprint,
+    returnType = "V",
+    parameters = listOf("I"),
+    filters = listOf(
+        string("android.media.extra.AUDIO_SESSION"),
+        methodCall(smali = "Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V")
+    )
 )

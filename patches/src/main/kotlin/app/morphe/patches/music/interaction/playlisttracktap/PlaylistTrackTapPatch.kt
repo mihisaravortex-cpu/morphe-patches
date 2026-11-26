@@ -8,26 +8,21 @@
 package app.morphe.patches.music.interaction.playlisttracktap
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
-import app.morphe.patcher.patch.BytecodePatchContext
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patcher.util.proxy.mutableTypes.MutableClass
-import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
+import app.morphe.patcher.patch.classDefBy
+import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.misc.settings.PreferenceScreen
 import app.morphe.patches.music.misc.settings.settingsPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.patches.shared.misc.settings.preference.ListPreference
 import com.android.tools.smali.dexlib2.AccessFlags
-import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
-import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
-import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/music/patches/PlaylistTrackTapPatch;"
 private const val EXTENSION_COMMAND_INTERFACE = $$"Lapp/morphe/extension/music/patches/PlaylistTrackTapPatch$Command;"
 
-@Suppress("unused")
-val playlistTrackTapPatch = bytecodePatch(
+val playlistTrackTapPatch = patch(
     name = "Playlist track tap action",
     description = "Adds an option to play only the tapped track of a playlist or album, " +
             "or to add it to the queue, instead of replacing the queue with the whole playlist.",
@@ -48,7 +43,7 @@ val playlistTrackTapPatch = bytecodePatch(
 
         val builderMatches = WatchEndpointCommandBuilderFingerprint.instructionMatches
 
-        val watchEndpointDefaultInstanceField = builderMatches[0].getFieldAccessed()
+        val watchEndpointDefaultInstanceField = builderMatches[0].fieldReference
         val watchEndpointClass = watchEndpointDefaultInstanceField.definingClass
 
         // GeneratedMessageLite and its builder, whose method names are not obfuscated.
@@ -56,23 +51,21 @@ val playlistTrackTapPatch = bytecodePatch(
         val messageClass = createBuilderMethod.definingClass
         val messageBuilderClass = createBuilderMethod.returnType
 
-        val playlistIdField = builderMatches[3].getFieldAccessed()
-        val presenceBitsField = builderMatches[5].getFieldAccessed()
-        val playlistIndexField = builderMatches[6].getFieldAccessed()
+        val playlistIdField = builderMatches[3].fieldReference
+        val presenceBitsField = builderMatches[5].fieldReference
+        val playlistIndexField = builderMatches[6].fieldReference
 
-        val commandDefaultInstanceField = builderMatches[7].getFieldAccessed()
-        val watchEndpointExtensionField = builderMatches[8].getFieldAccessed()
+        val commandDefaultInstanceField = builderMatches[7].fieldReference
+        val watchEndpointExtensionField = builderMatches[8].fieldReference
         val commandClass = commandDefaultInstanceField.definingClass
 
         val setExtensionMethod = builderMatches[9].getMethodCalled()
         val extendableBuilderClass = setExtensionMethod.definingClass
 
-        val getExtensionMethod = getCommandBuilderExtensionFingerprint(
-            extendableBuilderClass, setExtensionMethod.parameterTypes.first().toString()
-        ).method
+        val getExtensionMethod = CommandBuilderGetExtensionFingerprint.method
 
         val queueAddEndpointExtensionField = QueueAddEndpointCommandFingerprint
-            .instructionMatches.first().getFieldAccessed()
+            .instructionMatches.first().fieldReference
         val queueAddEndpointClass = queueAddEndpointExtensionField.definingClass
         val queueAddEndpointDefaultInstanceField = classDefBy(queueAddEndpointClass).fields.first {
             AccessFlags.STATIC.isSet(it.accessFlags) && it.type == queueAddEndpointClass
@@ -83,16 +76,14 @@ val playlistTrackTapPatch = bytecodePatch(
         // region Implement the extension interface using the proto classes.
 
         mutableClassDefBy(commandClass).apply {
-            interfaces.add(EXTENSION_COMMAND_INTERFACE)
-
             val toBuilder = "$messageClass->toBuilder()$messageBuilderClass"
             val copyOnWrite = "$messageBuilderClass->copyOnWrite()V"
             val build = "$messageBuilderClass->build()$messageClass"
             val instanceField = "$messageBuilderClass->instance:$messageClass"
 
-            addInterfaceMethod(
+            addPatchInterface(
+                EXTENSION_COMMAND_INTERFACE,
                 "patch_getWatchEndpoint",
-                registerCount = 2,
                 """
                     invoke-virtual { p0 }, $toBuilder
                     move-result-object v0
@@ -110,9 +101,9 @@ val playlistTrackTapPatch = bytecodePatch(
                 """
             )
 
-            addInterfaceMethod(
+            addPatchInterface(
+                EXTENSION_COMMAND_INTERFACE,
                 "patch_serializeWatchEndpoint",
-                registerCount = 1,
                 """
                     # MessageLite.toByteArray() is not obfuscated.
                     check-cast p1, $messageClass
@@ -122,9 +113,9 @@ val playlistTrackTapPatch = bytecodePatch(
                 """
             )
 
-            addInterfaceMethod(
+            addPatchInterface(
+                EXTENSION_COMMAND_INTERFACE,
                 "patch_createSingleTrackCommand",
-                registerCount = 3,
                 """
                     # Copy the watch endpoint without the playlist id and index.
                     check-cast p1, $messageClass
@@ -156,9 +147,9 @@ val playlistTrackTapPatch = bytecodePatch(
                 """
             )
 
-            addInterfaceMethod(
+            addPatchInterface(
+                EXTENSION_COMMAND_INTERFACE,
                 "patch_createQueueAddCommand",
-                registerCount = 3,
                 """
                     sget-object v0, $queueAddEndpointDefaultInstanceField
                     invoke-static { v0, p1 }, $messageClass->parseFrom($messageClass[B)$messageClass
@@ -187,31 +178,4 @@ val playlistTrackTapPatch = bytecodePatch(
             """
         )
     }
-}
-
-/**
- * Adds a public method declared by the extension [EXTENSION_COMMAND_INTERFACE] to this class.
- *
- * @param registerCount Number of registers used besides the parameter registers.
- */
-context(patchContext: BytecodePatchContext)
-private fun MutableClass.addInterfaceMethod(name: String, registerCount: Int, smali: String) {
-    val declaration = patchContext.classDefBy(EXTENSION_COMMAND_INTERFACE).methods.single { it.name == name }
-    // Parameter registers are the receiver, and each parameter.
-    val parameterRegisters = 1 + declaration.parameterTypes.size
-
-    methods.add(
-        ImmutableMethod(
-            type,
-            name,
-            declaration.parameters.map { ImmutableMethodParameter(it.type, null, null) },
-            declaration.returnType,
-            AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-            null,
-            null,
-            MutableMethodImplementation(registerCount + parameterRegisters),
-        ).toMutable().apply {
-            addInstructionsWithLabels(0, smali)
-        }
-    )
 }

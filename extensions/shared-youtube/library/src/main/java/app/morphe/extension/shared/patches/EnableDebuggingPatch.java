@@ -1,6 +1,7 @@
 /*
  * Copyright 2026 Morphe.
  * https://github.com/MorpheApp/morphe-patches/pull/2638
+ * https://github.com/MorpheApp/morphe-patches/pull/4416
  *
  * Original hard forked code:
  * https://github.com/ReVanced/revanced-patches/commit/724e6d61b2ecd868c1a9a37d465a688e83a74799
@@ -13,11 +14,20 @@ package app.morphe.extension.shared.patches;
 import static java.lang.Boolean.FALSE;
 import static java.lang.Boolean.TRUE;
 
-import java.util.ArrayList;
+import android.app.ActivityManager;
+import android.app.ApplicationExitInfo;
+import android.content.Context;
+import android.os.Build;
+
+import androidx.annotation.RequiresApi;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,8 +35,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import app.morphe.extension.shared.Logger;
-import app.morphe.extension.shared.settings.BaseSettings;
-import app.morphe.extension.shared.settings.SharedYouTubeSettings;
+import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.settings.SharedSettings;
+import app.morphe.extension.shared.settings.preference.FeatureFlags;
 import app.morphe.extension.shared.settings.preference.FeatureFlagsBisect;
 
 @SuppressWarnings("unused")
@@ -38,7 +49,41 @@ public final class EnableDebuggingPatch {
      * while the app is running then failing to restart
      * resulting in an incomplete log.
      */
-    private static final boolean LOG_FEATURE_FLAGS = BaseSettings.DEBUG.get();
+    private static final boolean LOG_FEATURE_FLAGS = Logger.isDebugEnabled();
+
+    /**
+     * Flags to hide from the UI.
+     */
+    private static final Set<Long> FLAGS_TO_IGNORE = Set.of(
+            45386834L, // 'You' tab settings icon.
+            45532100L  // Cairo flag. Turning this off with all other flags causes the settings menu to be a mix of old/new.
+    );
+
+    public static final FeatureFlags<Long> FEATURE_FLAGS = new FeatureFlags<>() {
+        @Override
+        public Map<Long, Boolean> getLoggedFlags() {
+            if (LOG_FEATURE_FLAGS) {
+                return Collections.unmodifiableMap(featureFlags);
+            }
+
+            return Collections.emptyMap();
+        }
+
+        @Override
+        protected Long parseFlag(String flag) {
+            return Long.parseLong(flag);
+        }
+
+        @Override
+        protected boolean hasNumericFlags() {
+            return true;
+        }
+
+        @Override
+        protected Set<Long> getFlagsToIgnore() {
+            return FLAGS_TO_IGNORE;
+        }
+    };
 
     private static final Map<Long, Boolean> OVERRIDDEN_FEATURE_FLAGS = loadOverriddenFlags();
 
@@ -48,13 +93,67 @@ public final class EnableDebuggingPatch {
 
     static {
         FeatureFlagsBisect.handleAppStartup();
+
+        if (LOG_FEATURE_FLAGS && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Utils.runOnBackgroundThread(EnableDebuggingPatch::logProcessExits);
+        }
+    }
+
+    /**
+     * Logs why the previous processes ended, such as a crash, an ANR or a kill in the background,
+     * which the app cannot log itself.
+     */
+    @RequiresApi(api = Build.VERSION_CODES.R)
+    private static void logProcessExits() {
+        try {
+            Context context = Utils.getContext();
+            String packageName = context.getPackageName();
+            StringBuilder builder = new StringBuilder("Last process exits:");
+            int count = 0;
+            for (ApplicationExitInfo exit : context.getSystemService(ActivityManager.class)
+                    .getHistoricalProcessExitReasons(packageName, 0, 20)) {
+                // The WebView processes of the app are listed too.
+                if (!exit.getProcessName().startsWith(packageName)) continue;
+                if (count++ >= 5) break;
+
+                builder.append('\n').append(exit);
+                // The system keeps the thread dump of an ANR. The main thread shows what blocked the app.
+                if (exit.getReason() == ApplicationExitInfo.REASON_ANR) {
+                    appendAnrMainThread(builder, exit);
+                }
+            }
+            Logger.printDebug(builder::toString);
+        } catch (Exception ex) {
+            Logger.printException(() -> "logProcessExits failure", ex);
+        }
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.R)
+    private static void appendAnrMainThread(StringBuilder builder, ApplicationExitInfo exit) {
+        try (InputStream trace = exit.getTraceInputStream()) {
+            if (trace == null) return;
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(trace, StandardCharsets.UTF_8));
+            boolean mainThread = false;
+            int lines = 0;
+            for (String line; (line = reader.readLine()) != null && lines < 60; ) {
+                if (line.startsWith("\"main\"")) mainThread = true;
+                else if (mainThread && line.isEmpty()) break;
+                if (mainThread) {
+                    builder.append("\n  ").append(line);
+                    lines++;
+                }
+            }
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "Could not read the ANR trace", ex);
+        }
     }
 
     private static Map<Long, Boolean> loadOverriddenFlags() {
         if (!LOG_FEATURE_FLAGS) return Collections.emptyMap();
 
-        List<Long> disabled = parseFlagList(SharedYouTubeSettings.DISABLED_FEATURE_FLAGS.get());
-        List<Long> forced = parseFlagList(SharedYouTubeSettings.FORCED_FEATURE_FLAGS.get());
+        List<Long> disabled = FEATURE_FLAGS.parseFlagList(SharedSettings.DISABLED_FEATURE_FLAGS.get());
+        List<Long> forced = FEATURE_FLAGS.parseFlagList(SharedSettings.FORCED_FEATURE_FLAGS.get());
 
         logFlags("Disabled feature flags:", disabled);
         logFlags("Forced feature flags:", forced);
@@ -89,7 +188,7 @@ public final class EnableDebuggingPatch {
             }
             // Always add flag but only log if flag is enabled.
             if (featureFlags.putIfAbsent(flagObj, value) == null && value) {
-                Logger.printDebug(() -> "boolean feature is enabled: " + flag);
+                Logger.printVerbose(() -> "boolean feature is enabled: " + flag);
             }
         }
 
@@ -107,7 +206,7 @@ public final class EnableDebuggingPatch {
             }
             if (featureFlags.putIfAbsent(flagObj, TRUE) == null) {
                 // Align the log outputs to make post-processing easier.
-                Logger.printDebug(() -> " double feature is enabled: " + flag
+                Logger.printVerbose(() -> " double feature is enabled: " + flag
                         + " value: " + value + (defaultValue == 0 ? "" : " default: " + defaultValue));
             }
         }
@@ -125,7 +224,7 @@ public final class EnableDebuggingPatch {
                 return defaultValue;
             }
             if (featureFlags.putIfAbsent(flagObj, TRUE) == null) {
-                Logger.printDebug(() -> "   long feature is enabled: " + flag
+                Logger.printVerbose(() -> "   long feature is enabled: " + flag
                         + " value: " + value + (defaultValue == 0 ? "" : " default: " + defaultValue));
             }
         }
@@ -143,7 +242,7 @@ public final class EnableDebuggingPatch {
                 return defaultValue;
             }
             if (featureFlags.putIfAbsent(flagObj, TRUE) == null) {
-                Logger.printDebug(() -> " string feature is enabled: " + flag
+                Logger.printVerbose(() -> " string feature is enabled: " + flag
                         + " value: " + value + (defaultValue.isEmpty() ? "" : " default: " + defaultValue));
             }
         }
@@ -152,74 +251,30 @@ public final class EnableDebuggingPatch {
     }
 
     /**
-     * Get all logged feature flags.
-     * @return Map of all known flags and their current state
+     * Injection point.
      */
-    public static Map<Long, Boolean> getAllLoggedFlags() {
+    public static long isBootstrapFeatureFlagEnabled(long value, int flag) {
         if (LOG_FEATURE_FLAGS) {
-            return Collections.unmodifiableMap(featureFlags);
-        }
-
-        return Collections.emptyMap();
-    }
-
-    /**
-     * Serializes flags into the format used by the settings.
-     * @param flags Flag IDs to serialize
-     * @return String containing newline-separated flag IDs
-     */
-    public static String serializeFlags(Collection<Long> flags) {
-        return serializeFlags(flags, '\n');
-    }
-
-    /**
-     * @param flags     Flag IDs to serialize
-     * @param separator Separator to put between the flag IDs
-     * @return String containing the separated flag IDs
-     */
-    public static String serializeFlags(Collection<Long> flags, char separator) {
-        StringBuilder builder = new StringBuilder(10 * flags.size());
-        for (Long flag : flags) {
-            //noinspection SizeReplaceableByIsEmpty
-            if (builder.length() != 0) {
-                builder.append(separator);
+            Long flagObj = (long) flag;
+            Boolean override = OVERRIDDEN_FEATURE_FLAGS.get(flagObj);
+            if (FALSE.equals(override)) {
+                return 0;
             }
-            builder.append(flag);
-        }
 
-        return builder.toString();
-    }
-
-    /**
-     * Public method for parsing flags.
-     * @param flags String containing flag IDs separated by commas or whitespace
-     * @return Set of parsed flag IDs
-     */
-    public static Set<Long> parseFlags(String flags) {
-        return new HashSet<>(parseFlagList(flags));
-    }
-
-    /**
-     * @param flags String containing flag IDs separated by commas or whitespace
-     * @return Parsed flag IDs, in the order they appear
-     */
-    public static List<Long> parseFlagList(String flags) {
-        if (flags.isBlank()) {
-            return Collections.emptyList();
-        }
-
-        String[] split = flags.split("[,\\s]+");
-        List<Long> parsedFlags = new ArrayList<>(split.length);
-        for (String flag : split) {
-            String trimmedFlag = flag.trim();
-            if (trimmedFlag.isEmpty()) continue; // Skip empty entries.
-            try {
-                parsedFlags.add(Long.parseLong(trimmedFlag));
-            } catch (NumberFormatException e) {
-                Logger.printException(() -> "Invalid flag ID: " + flag);
+            // Bootstrap store flag ids are packed bit field locations, and never overlap server flag ids.
+            // Bits 16-29 of the id are the size of the flag value in bits.
+            if (((flag >>> 16) & 0x3FFF) == 1) {
+                if (override != null) {
+                    return 1;
+                }
+                if (featureFlags.putIfAbsent(flagObj, value != 0) == null && value != 0) {
+                    Logger.printVerbose(() -> "boolean feature is enabled: " + flag);
+                }
+            } else if (value != 0 && featureFlags.putIfAbsent(flagObj, TRUE) == null) {
+                Logger.printVerbose(() -> "   long feature is enabled: " + flag + " value: " + value);
             }
         }
 
-        return parsedFlags;
+        return value;
     }
 }

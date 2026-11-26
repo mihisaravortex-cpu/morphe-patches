@@ -10,13 +10,12 @@
 
 package app.morphe.patches.youtube.layout.captions
 
+import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.patch
 import app.morphe.patches.shared.misc.settings.preference.ListPreference
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
-import app.morphe.patches.youtube.misc.playservice.is_20_26_or_greater
-import app.morphe.patches.youtube.misc.playservice.versionCheckPatch
 import app.morphe.patches.youtube.misc.settings.settingsPatch
 import app.morphe.patches.youtube.shared.hookVideoStarted
 import app.morphe.patches.youtube.shared.startVideoInformerPatch
@@ -24,32 +23,24 @@ import app.morphe.patches.youtube.video.information.onCreateHook
 import app.morphe.patches.youtube.video.information.videoInformationPatch
 import app.morphe.util.insertLiteralOverride
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/youtube/patches/AutoCaptionsPatch;"
 
-internal val autoCaptionsPatch = bytecodePatch(
+internal val autoCaptionsPatch = patch(
     description = "Adds an option to disable captions from being automatically enabled.",
 ) {
     dependsOn(
         sharedExtensionPatch,
         settingsPatch,
         startVideoInformerPatch,
-        versionCheckPatch,
         videoInformationPatch
     )
 
     execute {
         settingsMenuCaptionGroup.add(
-            if (is_20_26_or_greater) {
-                ListPreference("morphe_auto_captions_style")
-            } else {
-                ListPreference(
-                    key = "morphe_auto_captions_style",
-                    entriesKey = "morphe_auto_captions_style_legacy_entries",
-                    entryValuesKey = "morphe_auto_captions_style_legacy_entry_values"
-                )
-            }
+            ListPreference("morphe_auto_captions_style")
         )
 
         SubtitleManagerFingerprint.let {
@@ -64,6 +55,32 @@ internal val autoCaptionsPatch = bytecodePatch(
                         move-result v$register
                     """
                 )
+
+                // Read at the start of the method, before the hook above, so its index is not moved by it.
+                val reasonIndex = it.instructionMatches.first().index
+                val reasonRegister = getInstruction<TwoRegisterInstruction>(reasonIndex).registerA
+
+                addInstruction(
+                    reasonIndex + 1,
+                    "invoke-static { v$reasonRegister }, $EXTENSION_CLASS->setCaptionSelectionReason(I)V"
+                )
+            }
+        }
+
+        // Same method as the hook above, so it is matched again after it changed the method.
+        SubtitleManagerForcedTrackFingerprint.let {
+            it.clearMatch()
+            it.method.apply {
+                val index = it.instructionMatches.first().index
+                val register = getInstruction<TwoRegisterInstruction>(index).registerA
+
+                addInstructions(
+                    index + 1,
+                    """
+                        invoke-static { v$register }, $EXTENSION_CLASS->showForcedCaptions(Z)Z
+                        move-result v$register
+                    """
+                )
             }
         }
 
@@ -71,14 +88,12 @@ internal val autoCaptionsPatch = bytecodePatch(
 
         hookVideoStarted("$EXTENSION_CLASS->videoInformationLoaded()V")
 
-        if (is_20_26_or_greater) {
-            NoVolumeCaptionsFeatureFlagFingerprint.matchAll().forEach {
-                // 21.30+ inlines the flag lookup and must patch ~4 places.
-                it.method.insertLiteralOverride(
-                    it.instructionMatches.first().index,
-                    "$EXTENSION_CLASS->disableMuteAutoCaptions(Z)Z"
-                )
-            }
+        NoVolumeCaptionsFeatureFlagFingerprint.matchAll().forEach {
+            // 21.30+ inlines the flag lookup and must patch ~4 places.
+            it.method.insertLiteralOverride(
+                it.instructionMatches.first().index,
+                "$EXTENSION_CLASS->disableMuteAutoCaptions(Z)Z"
+            )
         }
     }
 }

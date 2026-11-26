@@ -8,6 +8,8 @@
 
 package app.morphe.extension.shared.spoof.potoken;
 
+import static app.morphe.extension.shared.patches.AppCheckPatch.IS_YOUTUBE_MUSIC;
+
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.os.Handler;
@@ -17,9 +19,11 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 import androidx.annotation.NonNull;
 
@@ -28,7 +32,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
+import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 
@@ -87,6 +93,23 @@ public class PoTokenWebView {
         });
         attachToCurrentActivity();
 
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                // All WebViews of the app share the renderer, which Android can stop to free memory.
+                // Without this, the app is closed. The generator is made again for the next PoToken.
+                Logger.printInfo(() -> "PoToken WebView renderer is gone, crashed: " + detail.didCrash());
+                expirationMs = 0;
+                PoTokenException.BadWebViewException error =
+                        new PoTokenException.BadWebViewException("The renderer is gone");
+                for (CompletableFuture<String> continuation : poTokenContinuations.values()) {
+                    continuation.completeExceptionally(error);
+                }
+                poTokenContinuations.clear();
+                onInitializationErrorCloseAndCancel(error);
+                return true;
+            }
+        });
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onConsoleMessage(ConsoleMessage m) {
@@ -127,6 +150,15 @@ public class PoTokenWebView {
         Utils.runOnMainThread(() -> {
             try {
                 PoTokenWebView instance = new PoTokenWebView(future);
+                if (IS_YOUTUBE_MUSIC && instance.webView.getParent() == null) {
+                    // Android Auto can start playback with only YouTube Music's service running on the
+                    // phone, leaving the new WebView without a MusicActivity to attach to.
+                    // Without MusicActivity, no parent view holds the WebView while it loads Google's BotGuard script.
+                    // If nothing else holds a reference during that wait, Android's GC can free the WebView,
+                    // so keep PoTokenWebView alive until the script is ready to create playback tokens.
+                    var pendingWebView = new AtomicReference<>(instance);
+                    future.whenComplete((result, error) -> pendingWebView.set(null));
+                }
                 instance.loadHtmlAndObtainBotGuard();
             } catch (Exception e) {
                 future.completeExceptionally(e);

@@ -39,9 +39,9 @@ public final class CronetTransport {
     /**
      * Registers an engine returned by {@code CronetEngine.Builder.buildExperimental()}.
      */
-    public static boolean registerCronetEngine(CronetEngine engine, boolean proxyConfigured) {
+    public static void registerCronetEngine(CronetEngine engine, boolean proxyConfigured) {
         if (!isUsableEngine(engine)) {
-            return false;
+            return;
         }
 
         boolean registrationChanged = false;
@@ -64,12 +64,12 @@ public final class CronetTransport {
             Logger.printDebug(() -> "Registered Cronet engine, proxy configured: "
                     + proxyConfigured);
         }
-        return true;
     }
 
     /**
      * Gives the application-wide engine priority over other registered engines.
      */
+    @SuppressWarnings("UnusedReturnValue")
     public static boolean setMainCronetEngine(CronetEngine engine) {
         if (!isUsableEngine(engine)) {
             return false;
@@ -98,10 +98,10 @@ public final class CronetTransport {
             boolean allowDirectFallback
     ) throws IOException {
         boolean https = "https".equalsIgnoreCase(url.getProtocol());
-        List<CronetEngine> engines = getEligibleEngines(
-                requireProxy,
-                allowDirectFallback
-        );
+        List<CronetEngine> engines;
+        synchronized (ENGINE_LOCK) {
+            engines = getEligibleEnginesLocked(requireProxy, allowDirectFallback);
+        }
         HttpURLConnection connection = createCronetConnectionChain(url, engines);
         if (connection != null) {
             return addDirectHttpFallback(url, connection, allowDirectFallback);
@@ -215,15 +215,6 @@ public final class CronetTransport {
         }
     }
 
-    private static List<CronetEngine> getEligibleEngines(
-            boolean requireProxy,
-            boolean allowDirectFallback
-    ) {
-        synchronized (ENGINE_LOCK) {
-            return getEligibleEnginesLocked(requireProxy, allowDirectFallback);
-        }
-    }
-
     private static List<CronetEngine> getEligibleEnginesLocked(
             boolean requireProxy,
             boolean allowDirectFallback
@@ -294,6 +285,7 @@ public final class CronetTransport {
         return connection;
     }
 
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     private static boolean isUsableEngine(CronetEngine engine) {
         if (engine == null) {
             return false;

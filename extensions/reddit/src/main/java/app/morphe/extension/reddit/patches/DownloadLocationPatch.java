@@ -79,7 +79,7 @@ public final class DownloadLocationPatch {
 
         final StringSetting setting;
         /**
-         * Key in the per account JSON object.
+         * Key in the per-account JSON object.
          */
         final String accountKey;
 
@@ -164,6 +164,7 @@ public final class DownloadLocationPatch {
     /**
      * @return If this patch was included during patching.
      */
+    @SuppressWarnings("SameReturnValue")
     public static boolean isPatchIncluded() {
         return false;  // Modified during patching.
     }
@@ -300,6 +301,20 @@ public final class DownloadLocationPatch {
         return insert(resolver, uri, values, new Media(null, TYPE_IMAGE, null));
     }
 
+    /**
+     * Inserts a gallery item saved by the Download all from gallery patch,
+     * which uses the options of images saved by Reddit.
+     */
+    @Nullable
+    public static Uri insertGalleryItem(ContentResolver resolver, Uri uri, ContentValues values, Link post, String url) {
+        String mimeType = values.getAsString(MediaStore.MediaColumns.MIME_TYPE);
+        String type = mimeType.startsWith("video/") ? TYPE_VIDEO
+                : mimeType.equals("image/gif") ? TYPE_GIF
+                : TYPE_IMAGE;
+        return insert(resolver, uri, values,
+                new Media(new Source(post.getSubreddit(), post.getAuthor()), type, getImageName(url)));
+    }
+
     @Nullable
     private static Uri insert(ContentResolver resolver, Uri uri, ContentValues values, Media media) {
         // Relative paths require Android 10.
@@ -406,7 +421,7 @@ public final class DownloadLocationPatch {
     }
 
     /**
-     * Key in the per account JSON object, for if the account options are used.
+     * Key in the per-account JSON object, for if the account options are used.
      */
     private static final String ACCOUNT_ENABLED_KEY = "enabled";
 

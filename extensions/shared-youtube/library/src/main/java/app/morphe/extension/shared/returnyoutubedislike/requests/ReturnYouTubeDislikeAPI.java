@@ -34,6 +34,7 @@ import java.util.Objects;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.requests.NetworkReconnect;
 import app.morphe.extension.shared.requests.Requester;
 import app.morphe.extension.shared.returnyoutubedislike.ReturnYouTubeDislike;
 import app.morphe.extension.shared.settings.SharedYouTubeSettings;
@@ -52,7 +53,7 @@ public class ReturnYouTubeDislikeAPI {
 
     /**
      * Default connection and response timeout for voting and registration.
-     *
+     * <p>
      * Voting and user registration runs in the background and has no urgency
      * so this can be a larger value.
      */
@@ -62,7 +63,7 @@ public class ReturnYouTubeDislikeAPI {
      * RYD API sometimes returns 401 (authorization error), even though the user ID is valid.
      * There is no known fix for this (resetting to a different user ID does not fix it),
      * so instead just quietly ignore the error.
-     *
+     * <p>
      * See <a href="https://github.com/Anarios/return-youtube-dislike/issues/1153">RYD bug report</a>.
      */
     private static final int HTTP_STATUS_CODE_UNAUTHORIZED = 401;
@@ -156,30 +157,12 @@ public class ReturnYouTubeDislikeAPI {
     } // utility class
 
     /**
-     * Simulates a slow response by doing meaningless calculations.
-     * Used to debug the app UI and verify UI timeout logic works
+     * @return If the API calls are paused, such as after the API limited the requests,
+     *         so a fetch gives no data until they resume.
      */
-    private static void randomlyWaitIfLocallyDebugging() {
-        final boolean DEBUG_RANDOMLY_DELAY_NETWORK_CALLS = false; // set true to debug UI
-
-        //noinspection ConstantValue
-        if (DEBUG_RANDOMLY_DELAY_NETWORK_CALLS) {
-            final long amountOfTimeToWaste = (long) (Math.random()
-                    * (API_GET_VOTES_TCP_TIMEOUT_MILLISECONDS + API_GET_VOTES_HTTP_TIMEOUT_MILLISECONDS));
-            Utils.doNothingForDuration(amountOfTimeToWaste);
-        }
-    }
-
-    /**
-     * Clears any backoff rate limits in effect.
-     * Should be called if RYD is turned on/off.
-     */
-    public static void resetRateLimits() {
-        if (lastApiCallFailed || timeToResumeAPICalls != 0) {
-            Logger.printDebug(() -> "Reset rate limit");
-        }
-        lastApiCallFailed = false;
-        timeToResumeAPICalls = 0;
+    public static boolean isApiCallsPaused() {
+        final long resumeTime = timeToResumeAPICalls;
+        return resumeTime != 0 && System.currentTimeMillis() <= resumeTime;
     }
 
     /**
@@ -215,7 +198,8 @@ public class ReturnYouTubeDislikeAPI {
         return httpResponseCode == HTTP_STATUS_CODE_RATE_LIMIT;
     }
 
-    @SuppressWarnings("NonAtomicOperationOnVolatileField") // Don't care, fields are only estimates.
+    @SuppressWarnings("NonAtomicOperationOnVolatileField")
+    // Don't care, fields are only estimates.
     private static void updateRateLimitAndStats(long timeNetworkCallStarted, boolean connectionError, boolean rateLimitHit) {
         if (connectionError && rateLimitHit) {
             throw new IllegalArgumentException();
@@ -226,7 +210,6 @@ public class ReturnYouTubeDislikeAPI {
         fetchCallResponseTimeMax = Math.max(responseTimeOfFetchCall, fetchCallResponseTimeMax);
         fetchCallCount++;
         if (connectionError) {
-            timeToResumeAPICalls = System.currentTimeMillis() + BACKOFF_CONNECTION_ERROR_MILLISECONDS;
             fetchCallResponseTimeLast = responseTimeOfFetchCall;
             fetchCallNumberOfFailures++;
             lastApiCallFailed = true;
@@ -280,6 +263,8 @@ public class ReturnYouTubeDislikeAPI {
         }
         Logger.printDebug(() -> "Fetching votes for: " + videoId);
         final long timeNetworkCallStarted = System.currentTimeMillis();
+        // If the fetch failed because the device has no connection, which is not an error of the API.
+        boolean offline = false;
 
         try {
             HttpURLConnection connection = getRYDConnectionFromRoute(ReturnYouTubeDislikeRoutes.GET_DISLIKES, videoId);
@@ -293,7 +278,16 @@ public class ReturnYouTubeDislikeAPI {
             connection.setConnectTimeout(API_GET_VOTES_TCP_TIMEOUT_MILLISECONDS); // timeout for TCP connection to server
             connection.setReadTimeout(API_GET_VOTES_HTTP_TIMEOUT_MILLISECONDS); // timeout for server response
 
-            randomlyWaitIfLocallyDebugging();
+            // Simulates a slow response by doing meaningless calculations.
+            // Used to debug the app UI and verify UI timeout logic works
+            final boolean DEBUG_RANDOMLY_DELAY_NETWORK_CALLS = false; // set true to debug UI
+
+            //noinspection ConstantValue
+            if (DEBUG_RANDOMLY_DELAY_NETWORK_CALLS) {
+                final long amountOfTimeToWaste = (long) (Math.random()
+                        * (API_GET_VOTES_TCP_TIMEOUT_MILLISECONDS + API_GET_VOTES_HTTP_TIMEOUT_MILLISECONDS));
+                Utils.doNothingForDuration(amountOfTimeToWaste);
+            }
 
             final int responseCode = connection.getResponseCode();
             if (checkIfRateLimitWasHit(responseCode)) {
@@ -322,13 +316,18 @@ public class ReturnYouTubeDislikeAPI {
             connection.disconnect(); // Something went wrong, might as well disconnect.
         } catch (SocketTimeoutException ex) {
             handleConnectionError((str("morphe_ryd_failure_connection_timeout")), null, ex, Toast.LENGTH_SHORT);
+            offline = !NetworkReconnect.isOnline();
         } catch (IOException ex) {
             handleConnectionError((str("morphe_ryd_failure_generic", ex.getMessage())), null, ex, Toast.LENGTH_LONG);
+            offline = !NetworkReconnect.isOnline();
         } catch (Exception ex) {
             // should never happen
             Logger.printException(() -> "fetchVotes failure", ex);
         }
 
+        if (!offline) {
+            timeToResumeAPICalls = System.currentTimeMillis() + BACKOFF_CONNECTION_ERROR_MILLISECONDS;
+        }
         updateRateLimitAndStats(timeNetworkCallStarted, true, false);
         return null;
     }
@@ -449,6 +448,7 @@ public class ReturnYouTubeDislikeAPI {
         return userID;
     }
 
+    @SuppressWarnings("UnusedReturnValue")
     public static boolean sendVote(String videoId, ReturnYouTubeDislike.Vote vote) {
         Utils.verifyOffMainThread();
         Objects.requireNonNull(videoId);
@@ -600,6 +600,7 @@ public class ReturnYouTubeDislikeAPI {
     }
 
     // https://stackoverflow.com/a/157202
+    @SuppressWarnings("SameParameterValue")
     private static String randomString(int len) {
         String AB = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         SecureRandom rnd = new SecureRandom();

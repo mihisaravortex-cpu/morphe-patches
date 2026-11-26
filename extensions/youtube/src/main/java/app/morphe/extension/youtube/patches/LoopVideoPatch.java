@@ -42,6 +42,11 @@ public class LoopVideoPatch {
 
     private static WeakReference<SleepTimerController> sleepTimerControllerRef = new WeakReference<>(null);
 
+    @SuppressWarnings("SameReturnValue")
+    public static boolean isPatchIncluded() {
+        return false; // Modified during patching.
+    }
+
     /**
      * Injection point.
      */
@@ -109,10 +114,11 @@ public class LoopVideoPatch {
                     && status != null && "ENDED".equals(status.name());
 
             if (isEnded) {
-                if (isSleepTimerEndingVideo()) {
+                if (isSleepTimerEndingVideo() || LoopCountPatch.isLoopCountReached()) {
                     return false;
                 }
 
+                LoopCountPatch.onVideoLooped();
                 return VideoInformation.seekTo(isRangeActive()
                         // Fallback: if the video truly ended while range is active (videoTimeChanged was too slow),
                         // seek to range start so the end screen is dismissed.

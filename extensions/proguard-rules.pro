@@ -7,9 +7,10 @@
 -keep class com.google.** {
   *;
 }
-# Proguard can strip away kotlin intrinsics methods that are used by extension Kotlin code. Unclear why.
--keep class kotlin.jvm.internal.Intrinsics {
-    public static *;
+# QuackJS. It uses no reflection, so this is likely not needed and R8 could shrink it.
+# Kept for now until the library is tested with shrinking.
+-keep class meow.nyx.** {
+  *;
 }
 -dontwarn java.lang.reflect.AnnotatedType
 -dontwarn javax.lang.model.element.Modifier

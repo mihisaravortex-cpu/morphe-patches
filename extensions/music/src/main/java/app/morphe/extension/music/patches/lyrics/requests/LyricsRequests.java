@@ -24,12 +24,16 @@ import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
 import app.morphe.extension.music.patches.lyrics.model.Lyrics;
@@ -37,7 +41,7 @@ import app.morphe.extension.music.patches.lyrics.model.LyricsFilterDefaults;
 import app.morphe.extension.music.patches.lyrics.model.LyricsLine;
 import app.morphe.extension.music.patches.lyrics.model.TrackInfo;
 import app.morphe.extension.music.patches.lyrics.model.Word;
-import app.morphe.extension.music.patches.lyrics.parsers.CharactersConverter;
+import app.morphe.extension.music.patches.lyrics.utils.CharactersConverter;
 import app.morphe.extension.music.settings.Settings;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
@@ -48,21 +52,35 @@ import app.morphe.extension.shared.requests.Requester;
  */
 public final class LyricsRequests {
 
+    public static final String SIMPLIFIED_CHINESE = "zh-Hans";
+    /**
+     * For the endpoints that turn away an unrecognized client. Providers that answer only
+     * to a mobile agent keep one of their own.
+     */
+    public static final String CHROME_DESKTOP_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    + "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
+    /** Open to anyone, in need of no token. */
+    public static final String ITUNES_SEARCH_URL = "https://itunes.apple.com/search";
+    public static final int SOFT_MIN = 2;
+    public static final int VIDEO_ID_TRUST = 10;
+    public static final int NEUTRAL = 6;
     static final int MAX_CANDIDATES = 5;
     private static final int CONNECT_TIMEOUT_MILLISECONDS = 5 * 1000;
     private static final int READ_TIMEOUT_MILLISECONDS = 5 * 1000;
-
     private static volatile boolean customMatchMode;
+    private static volatile String decorationRegexSource;
+    private static volatile Pattern decorationPattern;
 
     private LyricsRequests() {
     }
 
-    public static void setCustomMatchMode(boolean on) {
-        customMatchMode = on;
-    }
-
     public static boolean isCustomMatchMode() {
         return customMatchMode;
+    }
+
+    public static void setCustomMatchMode(boolean on) {
+        customMatchMode = on;
     }
 
     static String userAgent() {
@@ -71,21 +89,45 @@ public final class LyricsRequests {
                 + " https://github.com/MorpheApp/morphe-patches";
     }
 
-    public static final String SIMPLIFIED_CHINESE = "zh-Hans";
-
-    /**
-     * For the endpoints that turn away an unrecognised client. Providers that answer only
-     * to a mobile agent keep one of their own.
-     */
-    public static final String CHROME_DESKTOP_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    + "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
-
-    /** Open to anyone, in need of no token. */
-    public static final String ITUNES_SEARCH_URL = "https://itunes.apple.com/search";
-
     public static String deviceLanguage() {
-        return Locale.getDefault().getLanguage();
+        Locale locale = Requester.getAppLocale();
+        String lang = locale.getLanguage().toLowerCase(Locale.ROOT);
+        switch (lang) {
+            case "iw":
+                return "he";
+            case "in":
+                return "id";
+            case "ji":
+                return "yi";
+            case "fil":
+                return "tl";
+            case "kmr":
+                return "ku";
+            default:
+                break;
+        }
+        if ("zh".equals(lang)) {
+            String script = locale.getScript();
+            if ("Hant".equalsIgnoreCase(script)) {
+                return "zh-TW";
+            }
+            if ("Hans".equalsIgnoreCase(script)) {
+                return "zh-CN";
+            }
+            String country = locale.getCountry().toUpperCase(Locale.ROOT);
+            if ("TW".equals(country) || "HK".equals(country) || "MO".equals(country)) {
+                return "zh-TW";
+            }
+            return "zh-CN";
+        }
+        if ("pt".equals(lang)) {
+            String country = locale.getCountry().toUpperCase(Locale.ROOT);
+            if ("PT".equals(country)) {
+                return "pt-PT";
+            }
+            return "pt-BR";
+        }
+        return lang;
     }
 
     public static String translationLanguage() {
@@ -103,6 +145,19 @@ public final class LyricsRequests {
                 : language.toLowerCase(Locale.ROOT);
     }
 
+    /** The resolved ruby language for reading/ruby prompts. */
+    public static String rubyLanguage() {
+        String language = Settings.LYRICS_RUBY_LANGUAGE.get();
+        return "DEFAULT".equalsIgnoreCase(language)
+                ? deviceLanguage()
+                : language.toLowerCase(Locale.ROOT);
+    }
+
+    /** Whether the user turned the romanization off, which leaves only the ruby. */
+    public static boolean isRomanizationOff() {
+        return "NONE".equalsIgnoreCase(Settings.LYRICS_ROMANIZE_LANGUAGE.get());
+    }
+
     /** Whether romanization is left on "Automatic", which reads the lyrics instead. */
     public static boolean isDefaultRomanizationLanguage() {
         return "DEFAULT".equalsIgnoreCase(Settings.LYRICS_ROMANIZE_LANGUAGE.get());
@@ -114,7 +169,15 @@ public final class LyricsRequests {
             return "";
         }
         int idx = language.indexOf('-');
-        return (idx >= 0 ? language.substring(0, idx) : language).toLowerCase(Locale.ROOT);
+        String subtag = (idx >= 0 ? language.substring(0, idx) : language).toLowerCase(Locale.ROOT);
+        return switch (subtag) {
+            case "iw" -> "he";
+            case "in" -> "id";
+            case "ji" -> "yi";
+            case "fil" -> "tl";
+            case "kmr" -> "ku";
+            default -> subtag;
+        };
     }
 
     @NonNull
@@ -130,9 +193,9 @@ public final class LyricsRequests {
         if (!region.isEmpty()) {
             return region;
         }
-        final Locale device = Locale.getDefault();
+        final Locale device = Requester.getAppLocale();
         final String script = device.getScript();
-        if (script != null && !script.isEmpty()) {
+        if (!script.isEmpty()) {
             return script;
         }
         final String country = chineseScriptOfRegion(device.getCountry());
@@ -146,7 +209,7 @@ public final class LyricsRequests {
     }
 
     @NonNull
-    private static String declaredScript(@Nullable String language) {
+    static String declaredScript(@Nullable String language) {
         if (language == null) {
             return "";
         }
@@ -160,7 +223,7 @@ public final class LyricsRequests {
         return "";
     }
 
-    private static boolean isScriptSpelling(String part) {
+    static boolean isScriptSpelling(String part) {
         for (int i = 0; i < part.length(); i++) {
             if (!Character.isLetter(part.charAt(i))) {
                 return false;
@@ -170,7 +233,7 @@ public final class LyricsRequests {
     }
 
     @NonNull
-    private static String regionSubtag(@Nullable String language) {
+    static String regionSubtag(@Nullable String language) {
         if (language == null) {
             return "";
         }
@@ -187,7 +250,7 @@ public final class LyricsRequests {
     }
 
     @NonNull
-    private static String chineseScriptOfRegion(@Nullable String region) {
+    static String chineseScriptOfRegion(@Nullable String region) {
         if (region == null) {
             return "";
         }
@@ -214,8 +277,17 @@ public final class LyricsRequests {
     }
 
     public static List<LyricsLine> applyOffset(List<LyricsLine> lines, long offsetMs) {
-        if (lines == null || lines.isEmpty() || offsetMs == 0L) {
-            return lines;
+        if (lines == null) {
+            return null;
+        }
+        if (lines.isEmpty()) {
+            return List.of();
+        }
+        // Always return a new list so the caller never shares a mutable reference with the input.
+        if (offsetMs == 0L) {
+            List<LyricsLine> copy = new ArrayList<>(lines.size());
+            copy.addAll(lines);
+            return copy;
         }
         List<LyricsLine> adjusted = new ArrayList<>(lines.size());
         for (LyricsLine line : lines) {
@@ -229,7 +301,8 @@ public final class LyricsRequests {
                         word.endMs() + offsetMs,
                         word.text(),
                         word.romaji(),
-                        word.endsWithSpace()));
+                        word.endsWithSpace(),
+                        word.ruby()));
             }
             adjusted.add(new LyricsLine(newStart, newEnd, line.text(), adjustedWords,
                     line.agentId(), line.isDuet(), line.isBG(), line.songPart()));
@@ -242,7 +315,7 @@ public final class LyricsRequests {
      * User-Agent header, and rate limits requests that do not.
      */
     static HttpURLConnection openConnection(String url) throws IOException {
-        // A cancelled lookup may still be finishing one blocking request.
+        // A canceled lookup may still be finishing one blocking request.
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedIOException("Lyrics lookup cancelled");
         }
@@ -259,7 +332,7 @@ public final class LyricsRequests {
      */
     static HttpURLConnection openConnection(String url,
                                             Map<String, String> headers) throws IOException {
-        // A cancelled lookup may still be finishing one blocking request.
+        // A canceled lookup may still be finishing one blocking request.
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedIOException("Lyrics lookup cancelled");
         }
@@ -305,7 +378,7 @@ public final class LyricsRequests {
 
     private static HttpURLConnection postConnection(String url, String body, String contentType,
                                                     Map<String, String> headers) throws IOException {
-        // A cancelled lookup may still be finishing one blocking request.
+        // A canceled lookup may still be finishing one blocking request.
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedIOException("Lyrics lookup cancelled");
         }
@@ -439,6 +512,253 @@ public final class LyricsRequests {
         lastRequestTime.set(System.currentTimeMillis());
     }
 
+    public static PreparedTrack prepare(TrackInfo track) {
+        return new PreparedTrack(track);
+    }
+
+    /**
+     * Normalizes a string for matching: NFKC, lowercase, canonical Chinese spelling, decoration strip,
+     * fullwidth punctuation fold and whitespace collapse. Semantic decorations
+     * (years, part numbers, live/acoustic/feat, …) are kept so that distinct
+     * versions do not collapse into a false EQUAL.
+     */
+    public static String normalizeForMatch(@Nullable String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String s = raw.trim();
+        if (s.isEmpty()) {
+            return "";
+        }
+        s = Normalizer.normalize(s, Normalizer.Form.NFKC);
+        s = s.toLowerCase(Locale.ROOT);
+        // Providers spell metadata Traditional or Simplified, so both are compared. ICU does
+        // not map 妳 to 你, so that observed title variant is folded explicitly.
+        s = CharactersConverter.toSimplified(s).replace('妳', '你');
+        s = stripDecorations(s);
+        s = foldPunctuation(s);
+        s = s.replaceAll("\\s+", " ").trim();
+        return s;
+    }
+
+    static String stripDecorations(String s) {
+        String regex = LyricsFilterDefaults.LYRICS_CUSTOM_REGEX.get();
+        if (regex.trim().isEmpty()) {
+            return s;
+        }
+        Pattern pattern = decorationPattern;
+        if (pattern == null || !regex.equals(decorationRegexSource)) {
+            try {
+                pattern = Pattern.compile(regex);
+            } catch (Exception ex) {
+                Logger.printDebug(() -> "Invalid lyrics decoration regex", ex);
+                return s;
+            }
+            decorationPattern = pattern;
+            decorationRegexSource = regex;
+        }
+        return pattern.matcher(s).replaceAll("");
+    }
+
+    static String foldPunctuation(String s) {
+        final StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= 0xFF01 && c <= 0xFF5E) {
+                c = (char) (c - 0xFEE0);
+            }
+            if (c == '·' || c == '•' || c == '・') {
+                continue;
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    public static boolean containsEither(String a, String b) {
+        if (a.isEmpty() || b.isEmpty()) {
+            return false;
+        }
+        if (a.contains(b) || b.contains(a)) {
+            final String shorter = a.length() <= b.length() ? a : b;
+            final String longer = a.length() <= b.length() ? b : a;
+            if (shorter.length() < 4 && !isCjk(shorter.charAt(0))) {
+                return longer.length() <= shorter.length() + 6;
+            }
+            if (shorter.length() < 2 && isCjk(shorter.charAt(0))) {
+                return longer.length() <= shorter.length() + 4;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    static boolean splitArtistHits(String candidateArtist, String queryArtist) {
+        final String[] parts = candidateArtist.split("\\s*(?:和|&|feat\\.?|ft\\.?|,|/|×)\\s*");
+        for (String part : parts) {
+            final String p = part.trim();
+            if (p.isEmpty()) {
+                continue;
+            }
+            if (p.equals(queryArtist)) {
+                return true;
+            }
+            if (p.length() >= 2 || queryArtist.length() < 4) {
+                if (containsEither(p, queryArtist)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public static boolean isCjk(char c) {
+        return Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN;
+    }
+
+    static double jaccard(String a, String b) {
+        final Set<String> ta = tokens(a);
+        final Set<String> tb = tokens(b);
+        if (ta.isEmpty() || tb.isEmpty()) {
+            return 0;
+        }
+        int inter = 0;
+        for (String t : ta) {
+            if (tb.contains(t)) {
+                inter++;
+            }
+        }
+        final int union = ta.size() + tb.size() - inter;
+        return union == 0 ? 0 : (double) inter / union;
+    }
+
+    static java.util.Set<String> tokens(String s) {
+        final java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        final StringBuilder cur = new StringBuilder();
+        for (int i = 0; i < s.length(); ) {
+            final int cp = s.codePointAt(i);
+            i += Character.charCount(cp);
+            if (Character.isLetterOrDigit(cp)) {
+                cur.appendCodePoint(cp);
+            } else {
+                if (Utils.isNotEmpty(cur)) {
+                    out.add(cur.toString());
+                    cur.setLength(0);
+                }
+            }
+        }
+        if (Utils.isNotEmpty(cur)) {
+            out.add(cur.toString());
+        }
+        return out;
+    }
+
+    /**
+     * High-match gate for first display / fallback eligibility.
+     * Channel A: aggregate score ≥ 7; Channel B: exact title with no counter-evidence.
+     * Artist mismatch is a hard veto.
+     */
+    public static boolean isHighMatch(MatchVerdict v) {
+        if (customMatchMode) {
+            return true;
+        }
+        if (v.title() == Evidence.NONE || v.title() == Evidence.MISSING) {
+            return false;
+        }
+        if (v.artist() == Evidence.MISMATCH) {
+            return false;
+        }
+        if (v.score() >= 7) {
+            return v.duration() != Evidence.MISMATCH || v.artist() == Evidence.MATCH;
+        }
+        return v.title() == Evidence.EQUAL
+                && v.duration() != Evidence.MISMATCH
+                && v.album() != Evidence.MISMATCH;
+    }
+
+    public static MatchVerdict evaluate(String title, String artist, long durationSec,
+                                        TrackInfo track) {
+        return prepare(track).evaluate(title, artist, durationSec, null);
+    }
+
+    public static int scoreTrackCandidate(String title, String artist, long durationSec,
+                                          TrackInfo track) {
+        return scoreTrackCandidate(title, artist, durationSec, null, track);
+    }
+
+    public static int scoreTrackCandidate(String title, String artist, long durationSec,
+                                          @Nullable String album, TrackInfo track) {
+        // Evaluated before adapters swap the candidate metadata for the query metadata
+        // through FetchResult.of(lyrics, track), so a counter-matching title is still rejected.
+        MatchVerdict verdict = prepare(track).evaluate(title, artist, durationSec, album);
+        if (customMatchMode) {
+            return rankScore(verdict);
+        }
+        return isHighMatch(verdict) ? verdict.score() : -1;
+    }
+
+    static int rankScore(MatchVerdict v) {
+        if (v.artist() == Evidence.MISMATCH) {
+            return 2;
+        }
+        return Math.max(v.score(), 5);
+    }
+
+    /** A lyric a provider has for the video id, with the votes its users gave it. */
+    record VotedLyrics(int votes, Lyrics lyrics) {
+    }
+
+    /**
+     * Candidates found by video id, which match the track equally, so they are scored like any
+     * video id match. The best synced and then the most voted of them are kept.
+     */
+    static List<Lyrics.ScoredLyrics> videoIdCandidates(List<VotedLyrics> found) {
+        found.sort(Comparator.comparingInt((VotedLyrics v) -> syncRank(v.lyrics()))
+                .thenComparingInt(VotedLyrics::votes).reversed());
+        List<Lyrics.ScoredLyrics> scored = new ArrayList<>();
+        for (VotedLyrics voted : found.subList(0, Math.min(found.size(), MAX_CANDIDATES))) {
+            scored.add(new Lyrics.ScoredLyrics(VIDEO_ID_TRUST + syncRank(voted.lyrics()),
+                    voted.lyrics()));
+        }
+        return scored;
+    }
+
+    public static int syncRank(Lyrics lyrics) {
+        for (LyricsLine line : lyrics.lines()) {
+            if (line.hasWordTimings()) {
+                return 2;
+            }
+        }
+        return lyrics.synced() ? 1 : 0;
+    }
+
+    public static int scoreLyricsCandidate(String title, String artist, long durationSec,
+                                           Lyrics lyrics, TrackInfo track) {
+        int score = scoreTrackCandidate(title, artist, durationSec, track);
+        return score < 0 ? score : score + syncRank(lyrics);
+    }
+
+    /**
+     * Queue composite: match score dominates; sync rank breaks ties;
+     * a query-variant penalty keeps original metadata ahead of derived variants.
+     */
+    public static int composite(int matchScore, Lyrics lyrics, int variantPenalty) {
+        return matchScore * 10 + syncRank(lyrics) - variantPenalty;
+    }
+
+    public static int scoreSingleResult(Lyrics lyrics) {
+        return 6 + syncRank(lyrics);
+    }
+
+    public enum Evidence {
+        EQUAL,
+        MATCH,
+        PARTIAL,
+        MISSING,
+        MISMATCH,
+        NONE
+    }
+
     public static final class MusicBrainzClient {
 
         private static final String BASE_URL = "https://musicbrainz.org/ws/2/";
@@ -564,29 +884,14 @@ public final class LyricsRequests {
         }
     }
 
-    public static final int SOFT_MIN = 2;
-
-    public static final int VIDEO_ID_TRUST = 10;
-
-    public static final int NEUTRAL = 6;
-
-    public enum Evidence {
-        EQUAL,
-        MATCH,
-        PARTIAL,
-        MISSING,
-        MISMATCH,
-        NONE
-    }
-
     /**
      * Result of evaluating a candidate's metadata against a prepared track.
      *
-     * @param score   0–11 ranking score (title 0–5 + artist 0–3 + duration 0–2 + album 0–1)
-     * @param title   title evidence
-     * @param artist  artist evidence
+     * @param score    0–11 ranking score (title 0–5 + artist 0–3 + duration 0–2 + album 0–1)
+     * @param title    title evidence
+     * @param artist   artist evidence
      * @param duration duration evidence (MISSING when either side unknown)
-     * @param album   album evidence
+     * @param album    album evidence
      */
     public record MatchVerdict(int score, Evidence title, Evidence artist,
                                Evidence duration, Evidence album) {
@@ -706,229 +1011,5 @@ public final class LyricsRequests {
             return new MatchVerdict(titleScore + artistScore + durationScore + albumScore,
                     titleEv, artistEv, durationEv, albumEv);
         }
-    }
-
-    public static PreparedTrack prepare(TrackInfo track) {
-        return new PreparedTrack(track);
-    }
-
-    /**
-     * Normalizes a string for matching: NFKC, lowercase, canonical Chinese spelling, decoration strip,
-     * fullwidth punctuation fold and whitespace collapse. Semantic decorations
-     * (years, part numbers, live/acoustic/feat, …) are kept so that distinct
-     * versions do not collapse into a false EQUAL.
-     */
-    public static String normalizeForMatch(@Nullable String raw) {
-        if (raw == null) {
-            return "";
-        }
-        String s = raw.trim();
-        if (s.isEmpty()) {
-            return "";
-        }
-        s = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC);
-        s = s.toLowerCase(Locale.ROOT);
-        // Providers spell metadata Traditional or Simplified, so both are compared. ICU does
-        // not map 妳 to 你, so that observed title variant is folded explicitly.
-        s = CharactersConverter.toSimplified(s).replace('妳', '你');
-        s = stripDecorations(s);
-        s = foldPunctuation(s);
-        s = s.replaceAll("\\s+", " ").trim();
-        return s;
-    }
-
-    private static volatile String decorationRegexSource;
-    private static volatile java.util.regex.Pattern decorationPattern;
-
-    private static String stripDecorations(String s) {
-        String regex = LyricsFilterDefaults.LYRICS_CUSTOM_REGEX.get();
-        if (regex.trim().isEmpty()) {
-            return s;
-        }
-        java.util.regex.Pattern pattern = decorationPattern;
-        if (pattern == null || !regex.equals(decorationRegexSource)) {
-            try {
-                pattern = java.util.regex.Pattern.compile(regex);
-            } catch (Exception ex) {
-                Logger.printDebug(() -> "Invalid lyrics decoration regex", ex);
-                return s;
-            }
-            decorationPattern = pattern;
-            decorationRegexSource = regex;
-        }
-        return pattern.matcher(s).replaceAll("");
-    }
-
-    private static String foldPunctuation(String s) {
-        final StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c >= 0xFF01 && c <= 0xFF5E) {
-                c = (char) (c - 0xFEE0);
-            }
-            if (c == '·' || c == '•' || c == '・') {
-                continue;
-            }
-            sb.append(c);
-        }
-        return sb.toString();
-    }
-
-    public static boolean containsEither(String a, String b) {
-        if (a.isEmpty() || b.isEmpty()) {
-            return false;
-        }
-        if (a.contains(b) || b.contains(a)) {
-            final String shorter = a.length() <= b.length() ? a : b;
-            final String longer = a.length() <= b.length() ? b : a;
-            if (shorter.length() < 4 && !isCjk(shorter.charAt(0))) {
-                return longer.length() <= shorter.length() + 6;
-            }
-            if (shorter.length() < 2 && isCjk(shorter.charAt(0))) {
-                return longer.length() <= shorter.length() + 4;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    private static boolean splitArtistHits(String candidateArtist, String queryArtist) {
-        final String[] parts = candidateArtist.split("\\s*(?:和|&|feat\\.?|ft\\.?|,|/|×)\\s*");
-        for (String part : parts) {
-            final String p = part.trim();
-            if (p.isEmpty()) {
-                continue;
-            }
-            if (p.equals(queryArtist)) {
-                return true;
-            }
-            if (p.length() >= 2 || queryArtist.length() < 4) {
-                if (containsEither(p, queryArtist)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    public static boolean isCjk(char c) {
-        return Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN;
-    }
-
-    static double jaccard(String a, String b) {
-        final java.util.Set<String> ta = tokens(a);
-        final java.util.Set<String> tb = tokens(b);
-        if (ta.isEmpty() || tb.isEmpty()) {
-            return 0;
-        }
-        int inter = 0;
-        for (String t : ta) {
-            if (tb.contains(t)) {
-                inter++;
-            }
-        }
-        final int union = ta.size() + tb.size() - inter;
-        return union == 0 ? 0 : (double) inter / union;
-    }
-
-    private static java.util.Set<String> tokens(String s) {
-        final java.util.Set<String> out = new java.util.LinkedHashSet<>();
-        final StringBuilder cur = new StringBuilder();
-        for (int i = 0; i < s.length(); ) {
-            final int cp = s.codePointAt(i);
-            i += Character.charCount(cp);
-            if (Character.isLetterOrDigit(cp)) {
-                cur.appendCodePoint(cp);
-            } else {
-                //noinspection SizeReplaceableByIsEmpty
-                if (cur.length() > 0) {
-                    out.add(cur.toString());
-                    cur.setLength(0);
-                }
-            }
-        }
-        //noinspection SizeReplaceableByIsEmpty
-        if (cur.length() > 0) {
-            out.add(cur.toString());
-        }
-        return out;
-    }
-
-    /**
-     * High-match gate for first display / fallback eligibility.
-     * Channel A: aggregate score ≥ 7; Channel B: exact title with no counter-evidence.
-     * Artist mismatch is a hard veto.
-     */
-    public static boolean isHighMatch(MatchVerdict v) {
-        if (customMatchMode) {
-            return true;
-        }
-        if (v.title() == Evidence.NONE || v.title() == Evidence.MISSING) {
-            return false;
-        }
-        if (v.artist() == Evidence.MISMATCH) {
-            return false;
-        }
-        if (v.score() >= 7) {
-            return v.duration() != Evidence.MISMATCH || v.artist() == Evidence.MATCH;
-        }
-        return v.title() == Evidence.EQUAL
-                && v.duration() != Evidence.MISMATCH
-                && v.album() != Evidence.MISMATCH;
-    }
-
-    public static MatchVerdict evaluate(String title, String artist, long durationSec,
-                                        TrackInfo track) {
-        return prepare(track).evaluate(title, artist, durationSec, null);
-    }
-
-    public static int scoreTrackCandidate(String title, String artist, long durationSec,
-                                          TrackInfo track) {
-        return scoreTrackCandidate(title, artist, durationSec, null, track);
-    }
-
-    public static int scoreTrackCandidate(String title, String artist, long durationSec,
-                                          @Nullable String album, TrackInfo track) {
-        // Evaluated before adapters swap the candidate metadata for the query metadata
-        // through FetchResult.of(lyrics, track), so a counter-matching title is still rejected.
-        MatchVerdict verdict = prepare(track).evaluate(title, artist, durationSec, album);
-        if (customMatchMode) {
-            return rankScore(verdict);
-        }
-        return isHighMatch(verdict) ? verdict.score() : -1;
-    }
-
-    static int rankScore(MatchVerdict v) {
-        if (v.artist() == Evidence.MISMATCH) {
-            return 2;
-        }
-        return Math.max(v.score(), 5);
-    }
-
-    public static int syncRank(Lyrics lyrics) {
-        for (LyricsLine line : lyrics.lines()) {
-            if (line.hasWordTimings()) {
-                return 2;
-            }
-        }
-        return lyrics.synced() ? 1 : 0;
-    }
-
-    public static int scoreLyricsCandidate(String title, String artist, long durationSec,
-                                           Lyrics lyrics, TrackInfo track) {
-        int score = scoreTrackCandidate(title, artist, durationSec, track);
-        return score < 0 ? score : score + syncRank(lyrics);
-    }
-
-    /**
-     * Queue composite: match score dominates; sync rank breaks ties;
-     * a query-variant penalty keeps original metadata ahead of derived variants.
-     */
-    public static int composite(int matchScore, Lyrics lyrics, int variantPenalty) {
-        return matchScore * 10 + syncRank(lyrics) - variantPenalty;
-    }
-
-    public static int scoreSingleResult(Lyrics lyrics) {
-        return 6 + syncRank(lyrics);
     }
 }

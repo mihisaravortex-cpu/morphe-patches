@@ -30,26 +30,98 @@ import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.methodCall
-import app.morphe.patcher.patch.BytecodePatchContext
 import app.morphe.patcher.patch.Option
-import app.morphe.patcher.patch.OptionException
 import app.morphe.patcher.patch.booleanOption
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patcher.patch.resourcePatch
+import app.morphe.patcher.patch.packageMetadata
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.patch.resourceXml
 import app.morphe.patcher.patch.stringOption
-import app.morphe.patches.util.resource.editText
-import app.morphe.patches.util.resource.transformStringResources
-import app.morphe.util.asSequence
-import app.morphe.util.findElementByAttributeValue
-import app.morphe.util.matchAllMethodIndicesForEach
+import app.morphe.patcher.util.matchAllMethodIndicesForEach
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
-import org.w3c.dom.Element
 import java.util.logging.Logger
 
 private const val PACKAGE_NAME_REDDIT = "com.reddit.frontpage"
 
+/**
+ * Android package name rules: at least two segments separated by dots,
+ * each segment starts with a letter and contains only letters, digits and underscores.
+ */
+private val VALID_PACKAGE_NAME_REGEX = Regex("^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$")
+private val WHITESPACE_REGEX = Regex("\\s+")
+private val INVALID_PACKAGE_NAME_CHARACTER_REGEX = Regex("[^a-zA-Z0-9_]")
+
+/**
+ * Prefix added to a package name segment that does not start with a letter.
+ */
+private const val FIXED_SEGMENT_PREFIX = "app"
+
+/**
+ * Segment appended to a package name that needed fixes other than replacing whitespace.
+ */
+private const val FIXED_PACKAGE_NAME_SUFFIX = "fixedname"
+
 private lateinit var packageNameOption: Option<String>
+
+/**
+ * Fixes a package name that does not follow the Android package name rules.
+ * Whitespace is replaced with underscores and empty segments are removed.
+ * Other invalid characters are replaced with underscores, and segments not starting
+ * with a letter are given a prefix. If any of those fixes were needed, or the name
+ * has only one segment, then ".fixedname" is appended.
+ *
+ * @return The package name if it is already valid, otherwise the fixed package name.
+ */
+internal fun fixPackageName(packageName: String): String {
+    if (packageName.matches(VALID_PACKAGE_NAME_REGEX)) return packageName
+
+    var appendSuffix = false
+
+    val segments = packageName.split('.').mapNotNull { segment ->
+        var fixedSegment = segment.trim().replace(WHITESPACE_REGEX, "_")
+        if (fixedSegment.isEmpty()) return@mapNotNull null
+
+        if (fixedSegment.contains(INVALID_PACKAGE_NAME_CHARACTER_REGEX)) {
+            fixedSegment = fixedSegment.replace(INVALID_PACKAGE_NAME_CHARACTER_REGEX, "_")
+            appendSuffix = true
+        }
+
+        if (!fixedSegment.first().isAsciiLetter()) {
+            fixedSegment = FIXED_SEGMENT_PREFIX + fixedSegment
+            appendSuffix = true
+        }
+
+        fixedSegment
+    }
+
+    if (appendSuffix || segments.size < 2) {
+        return (segments + FIXED_PACKAGE_NAME_SUFFIX).joinToString(".")
+    }
+
+    return segments.joinToString(".")
+}
+
+private fun Char.isAsciiLetter() = this in 'a'..'z' || this in 'A'..'Z'
+
+/**
+ * @return The package name option value. If the user provided package name is not valid,
+ *         it is fixed, a warning is logged, and the option is updated to the fixed name.
+ */
+private fun getPackageNameOptionValue(): String {
+    val packageName = packageNameOption.value!!
+    if (packageName == packageNameOption.default) return packageName
+
+    val fixedPackageName = fixPackageName(packageName)
+    if (fixedPackageName != packageName) {
+        Logger.getLogger(cloneAppPatch::class.java.name).warning(
+            "Package name \"$packageName\" is not a valid Android package name. " +
+                    "Using \"$fixedPackageName\" instead."
+        )
+        packageNameOption.value = fixedPackageName
+    }
+
+    return fixedPackageName
+}
 
 /**
  * Set the package name to use.
@@ -57,10 +129,9 @@ private lateinit var packageNameOption: Option<String>
  *
  * @param fallbackPackageName The package name to use if the user has not already specified a package name.
  * @return The package name that was set.
- * @throws OptionException.ValueValidationException If the package name is invalid.
  */
 fun setOrGetFallbackPackageName(fallbackPackageName: String): String {
-    val packageName = packageNameOption.value!!
+    val packageName = getPackageNameOptionValue()
 
     return if (packageName == packageNameOption.default) {
         fallbackPackageName.also { packageNameOption.value = it }
@@ -72,7 +143,7 @@ fun setOrGetFallbackPackageName(fallbackPackageName: String): String {
 /**
  * Selectively changes usage of Context.getPackageName() to the original package name.
  */
-context(patchContext: BytecodePatchContext)
+@Suppress("SameParameterValue")
 private fun applyGetPackageName(oldPackageName: String, classToChange: String) {
     val filter = methodCall(
         opcode = Opcode.INVOKE_VIRTUAL,
@@ -104,8 +175,7 @@ private fun applyGetPackageName(oldPackageName: String, classToChange: String) {
     }
 }
 
-@Suppress("unused")
-val cloneAppPatch = resourcePatch(
+val cloneAppPatch = patch(
     name = "Clone app",
     description = "Changes the app package name to allow installing the same app multiple times. " +
             "By default \".morphe\" is appended to the package name. Each cloned install must " +
@@ -121,7 +191,8 @@ val cloneAppPatch = resourcePatch(
         description = "Package name to use for the cloned app.",
         required = true,
     ) {
-        it == "Default" || it!!.matches(Regex("^[a-z]\\w*(\\.[a-z]\\w*)+$"))
+        // Invalid package names are fixed during patching. Only reject names with no usable text.
+        it!!.split('.').any { segment -> segment.isNotBlank() }
     }
 
     val updatePermissionsOption = booleanOption(
@@ -141,15 +212,15 @@ val cloneAppPatch = resourcePatch(
     )
 
     fun getReplacementPackageName(originalPackageName: String) : String {
-        val replacementPackageName = packageNameOption.value
+        val replacementPackageName = getPackageNameOptionValue()
         return if (replacementPackageName != packageNameOption.default) {
-            replacementPackageName!!
+            replacementPackageName
         } else {
             "$originalPackageName.morphe"
         }
     }
 
-    dependsOn(bytecodePatch {
+    dependsOn(patch {
         execute {
             when (val originalPackageName = packageMetadata.packageName) {
                 PACKAGE_NAME_REDDIT -> {
@@ -216,15 +287,14 @@ val cloneAppPatch = resourcePatch(
 
         val providerStringResources = mutableSetOf<String>()
 
-        document("AndroidManifest.xml").use { document ->
-            document.documentElement.setAttribute("package", newPackageName)
+        resourceXml("AndroidManifest.xml").use { manifest ->
+            manifest.root.setAttribute("package", newPackageName)
 
             if (applyUpdatePermissions) {
-                val permissions = document.getElementsByTagName("permission")
-                val usesPermissions = document.getElementsByTagName("uses-permission")
+                val usesPermissions = manifest.elements("uses-permission").toList()
 
-                permissions.asSequence().map { it as Element }.forEach {
-                    val oldName = it.getAttribute("android:name")
+                manifest.elements("permission").forEach {
+                    val oldName = it.attribute("android:name").orEmpty()
                     val newName = when {
                         oldName.startsWith('.') -> return@forEach
                         oldName.startsWith("$packageName.") -> oldName.replaceFirst(packageName, newPackageName)
@@ -233,18 +303,14 @@ val cloneAppPatch = resourcePatch(
                     it.setAttribute("android:name", newName)
 
                     // Update a corresponding <uses-permission> as well if it exists
-                    usesPermissions
-                        .findElementByAttributeValue("android:name", oldName)
+                    usesPermissions.firstOrNull { usesPermission -> usesPermission.attribute("android:name") == oldName }
                         ?.setAttribute("android:name", newName)
                 }
             }
 
             if (applyUpdateProviders) {
-                val providers =
-                    document.getElementsByTagName("provider").asSequence().map { it as Element }
-
-                for (provider in providers) {
-                    val authorities = provider.getAttribute("android:authorities").split(';')
+                for (provider in manifest.elements("provider")) {
+                    val authorities = provider.attribute("android:authorities").orEmpty().split(';')
                     val newAuthorities = authorities.map {
                         when {
                             it.startsWith("$packageName.") -> it.replaceFirst(packageName, newPackageName)
@@ -261,9 +327,13 @@ val cloneAppPatch = resourcePatch(
         }
 
         if (providerStringResources.isNotEmpty()) {
-            this["res/values/strings.xml"].editText { text ->
-                text.transformStringResources(providerStringResources) { authority ->
-                    if (authority.startsWith("$packageName.")) {
+            resourceXml("res/values/strings.xml").use { strings ->
+                providerStringResources.forEach { name ->
+                    val string = strings.resourceOrNull(name) ?: return@forEach
+                    val authority = string.text
+                    if (authority.isEmpty()) return@forEach
+
+                    string.text = if (authority.startsWith("$packageName.")) {
                         authority.replaceFirst(packageName, newPackageName)
                     } else {
                         "${newPackageName}_$authority"

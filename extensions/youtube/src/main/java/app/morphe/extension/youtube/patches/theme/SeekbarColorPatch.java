@@ -89,7 +89,7 @@ public final class SeekbarColorPatch {
 
             return color;
         } catch (Exception ex) {
-            Utils.showToastShort(str("morphe_seekbar_custom_color_invalid"));
+            Utils.showSnackbarShort(str("morphe_seekbar_custom_color_invalid"));
             Settings.SEEKBAR_CUSTOM_COLOR_PRIMARY.resetToDefault();
             Settings.SEEKBAR_CUSTOM_COLOR_ACCENT.resetToDefault();
 
@@ -107,6 +107,11 @@ public final class SeekbarColorPatch {
 
     public static boolean isCustomSeekbarColorEnabled() {
         return SEEKBAR_CUSTOM_COLOR_ENABLED;
+    }
+
+    @SuppressWarnings("SameReturnValue")
+    public static boolean isPatchIncluded() {
+        return false; // Modified during patching.
     }
 
     /**

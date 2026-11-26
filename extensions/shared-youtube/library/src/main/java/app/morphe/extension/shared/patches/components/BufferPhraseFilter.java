@@ -16,6 +16,7 @@
  * https://github.com/MorpheApp/morphe-patches/commit/f5371ca998c019609c2b5558b3408ab1fec065c8
  * https://github.com/MorpheApp/morphe-patches/commit/017eac71a3f9542b8ad6221e3600797d6b97fae4
  * https://github.com/MorpheApp/morphe-patches/pull/1972
+ * https://github.com/MorpheApp/morphe-patches/pull/4530
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to Morphe contributions.
  */
@@ -37,7 +38,7 @@ import java.nio.charset.StandardCharsets;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.StringTrieSearch;
-import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.patches.BaseVideoInformation;
 
 /**
  * Abstract base for Litho filters that scan the protocol buffer for phrase matches
@@ -47,52 +48,6 @@ import app.morphe.extension.shared.Utils;
  */
 @SuppressWarnings("unused")
 public abstract class BufferPhraseFilter extends Filter {
-
-    /**
-     * Strings found in the buffer for every video. Full strings should be specified.
-     * <p>
-     * This list does not include every common buffer string, and this can be added/changed as needed.
-     * Words must be entered with the exact casing as found in the buffer.
-     */
-    public static final String[] STRINGS_IN_EVERY_BUFFER = {
-            // Video playback data.
-            "googlevideo.com/initplayback?source=youtube", // Video url.
-            "ANDROID", // Video url parameter.
-            "https://i.ytimg.com/vi/", // Thumbnail url.
-            "mqdefault.jpg",
-            "hqdefault.jpg",
-            "sddefault.jpg",
-            "hq720.jpg",
-            "webp",
-            "_custom_", // Custom thumbnail set by video creator.
-            // Video decoders.
-            "OMX.ffmpeg.vp9.decoder",
-            "OMX.Intel.sw_vd.vp9",
-            "OMX.MTK.VIDEO.DECODER.SW.VP9",
-            "OMX.google.vp9.decoder",
-            "OMX.google.av1.decoder",
-            "OMX.sprd.av1.decoder",
-            "c2.android.av1.decoder",
-            "c2.android.av1-dav1d.decoder",
-            "c2.android.vp9.decoder",
-            "c2.mtk.sw.vp9.decoder",
-            // Analytics.
-            "searchR",
-            "browse-feed",
-            "FEwhat_to_watch",
-            "FEsubscriptions",
-            "search_vwc_description_transition_key",
-            "g-high-recZ",
-            // Text and litho components found in the buffer that belong to path filters.
-            "expandable_metadata.e",
-            "thumbnail.e",
-            "avatar.e",
-            "overflow_button.e",
-            "shorts-lockup-image",
-            "shorts-lockup.overlay-metadata.secondary-text",
-            "YouTubeSans-SemiBold",
-            "sans-serif"
-    };
 
     /**
      * Threshold for {@link #filteredVideosPercentage} that indicates all or nearly all
@@ -119,6 +74,8 @@ public abstract class BufferPhraseFilter extends Filter {
             // A/B test for subscribed video, and sometimes when tablet layout is enabled.
             "video_lockup_with_attachment.e",
             "compact_video.e",
+            // Card layout.
+            "lockup.e",
             "inline_shorts",
             "shorts_video_cell",
             "shorts_pivot_item.e"
@@ -127,7 +84,6 @@ public abstract class BufferPhraseFilter extends Filter {
     /**
      * Substrings that are never at the start of the path.
      */
-    @SuppressWarnings("FieldCanBeLocal")
     protected final StringFilterGroup containsFilter = new StringFilterGroup(
             null,
             "modern_type_shelf_header_content.e",
@@ -151,8 +107,7 @@ public abstract class BufferPhraseFilter extends Filter {
 
     /**
      * Rolling average of how many videos were filtered by a phrase.
-     * Used to detect if a phrase passes the initial check against {@link #STRINGS_IN_EVERY_BUFFER}
-     * but a phrase is still hiding all videos.
+     * Used to detect if a phrase is hiding all videos.
      */
     private volatile float filteredVideosPercentage;
 
@@ -179,24 +134,33 @@ public abstract class BufferPhraseFilter extends Filter {
     /**
      * @param contextInterface Context of the Litho element that is filtered.
      * @return whether filtering is active for the current feed / search context.
-     * Only consulted when the matched group is {@link #startsWithFilter} or
-     * {@link #containsFilter}. Extra path callbacks are assumed to be self-gated
-     * by their own {@link app.morphe.extension.shared.settings.BooleanSetting}.
+     * Only consulted when the matched group is {@link #isFeedGroup(StringFilterGroup)}.
+     * Other path callbacks are assumed to be self-gated by their own {@link app.morphe.extension.shared.settings.BooleanSetting}.
      */
     protected abstract boolean isActiveForFeedContext(ContextInterface contextInterface);
 
     /**
+     * @return whether the buffer of the path is searched. Paths that are not searched do not change the
+     * statistics used to detect excessively broad phrases.
+     */
+    protected boolean isSearchedPath(CharSequence path, StringFilterGroup matchedGroup) {
+        return true;
+    }
+
+    /**
+     * @param path             Path of the Litho element that is filtered.
      * @param contextInterface Context of the Litho element that is filtered.
      * @return the matched phrase if the buffer contains a match, or {@code null} otherwise.
      * Called after the path-exception check has passed.
      */
     @Nullable
-    protected abstract String matchBuffer(byte[] buffer, StringFilterGroup matchedGroup,
+    protected abstract String matchBuffer(byte[] buffer, CharSequence path, StringFilterGroup matchedGroup,
                                           ContextInterface contextInterface);
 
     /**
      * Optional hook invoked when a hide is confirmed. Subclasses can override to record stats.
      */
+    @SuppressWarnings("EmptyMethod")
     protected void onHideConfirmed(String matched) {
         // Default no-op.
     }
@@ -215,9 +179,13 @@ public abstract class BufferPhraseFilter extends Filter {
             return false;
         }
 
+        if (!isSearchedPath(path, matchedGroup)) {
+            return false;
+        }
+
         reparseIfNeeded();
 
-        if (isBaseFeedGroup(matchedGroup) && !isActiveForFeedContextGuarded(contextInterface)) {
+        if (isFeedGroup(matchedGroup) && !isActiveForFeedContextGuarded(contextInterface)) {
             return false;
         }
 
@@ -225,7 +193,7 @@ public abstract class BufferPhraseFilter extends Filter {
             return false; // Do not update statistics.
         }
 
-        String matched = matchBuffer(buffer, matchedGroup, contextInterface);
+        String matched = matchBuffer(buffer, path, matchedGroup, contextInterface);
         if (matched != null) {
             updateStats(true, matched);
             onHideConfirmed(matched);
@@ -236,7 +204,11 @@ public abstract class BufferPhraseFilter extends Filter {
         return false;
     }
 
-    private boolean isBaseFeedGroup(StringFilterGroup group) {
+    /**
+     * @return whether the group is only filtered if {@link #isActiveForFeedContext(ContextInterface)},
+     * and is not filtered while an excessively broad phrase is paused.
+     */
+    protected boolean isFeedGroup(StringFilterGroup group) {
         return group == startsWithFilter || group == containsFilter;
     }
 
@@ -307,110 +279,6 @@ public abstract class BufferPhraseFilter extends Filter {
         }
 
         return false;
-    }
-
-    /**
-     * Change first letter of the first word to use title case.
-     */
-    public static String titleCaseFirstWordOnly(String sentence) {
-        if (sentence.isEmpty()) {
-            return sentence;
-        }
-        final int firstCodePoint = sentence.codePointAt(0);
-        // In some non-English languages title case is different from uppercase.
-        return new StringBuilder()
-                .appendCodePoint(Character.toTitleCase(firstCodePoint))
-                .append(sentence, Character.charCount(firstCodePoint), sentence.length())
-                .toString();
-    }
-
-    /**
-     * Uppercase the first letter of each word.
-     */
-    public static String capitalizeAllFirstLetters(String sentence) {
-        if (sentence.isEmpty()) {
-            return sentence;
-        }
-
-        final int delimiter = ' ';
-        // Use code points and not characters to handle Unicode surrogates.
-        int[] codePoints = sentence.codePoints().toArray();
-        boolean capitalizeNext = true;
-        for (int i = 0, length = codePoints.length; i < length; i++) {
-            final int codePoint = codePoints[i];
-            if (codePoint == delimiter) {
-                capitalizeNext = true;
-            } else if (capitalizeNext) {
-                codePoints[i] = Character.toUpperCase(codePoint);
-                capitalizeNext = false;
-            }
-        }
-
-        return new String(codePoints, 0, codePoints.length);
-    }
-
-    /**
-     * @return If any of the given phrases would match a string in {@link #STRINGS_IN_EVERY_BUFFER}
-     * (which would cause the filter to hide all videos).
-     */
-    public static boolean phrasesWillHideAllVideos(String[] phrases, boolean matchWholeWords) {
-        for (String phrase : phrases) {
-            for (String commonString : STRINGS_IN_EVERY_BUFFER) {
-                if (matchWholeWords) {
-                    byte[] commonStringBytes = commonString.getBytes(StandardCharsets.UTF_8);
-                    int matchIndex = 0;
-                    while (true) {
-                        matchIndex = commonString.indexOf(phrase, matchIndex);
-                        if (matchIndex < 0) break;
-
-                        if (keywordMatchIsWholeWord(commonStringBytes, matchIndex, phrase.length())) {
-                            return true;
-                        }
-
-                        matchIndex++;
-                    }
-                } else if (Utils.containsAny(commonString, phrases)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * @return If the start and end indexes are not surrounded by other letters.
-     *         If the indexes are surrounded by numbers/symbols/punctuation it is considered a whole word.
-     */
-    public static boolean keywordMatchIsWholeWord(byte[] text, int keywordStartIndex, int keywordLength) {
-        final Integer codePointBefore = getUtf8CodePointBefore(text, keywordStartIndex);
-        if (codePointBefore != null && Character.isLetter(codePointBefore)) {
-            return false;
-        }
-
-        final Integer codePointAfter = getUtf8CodePointAt(text, keywordStartIndex + keywordLength);
-        //noinspection RedundantIfStatement
-        if (codePointAfter != null && Character.isLetter(codePointAfter)) {
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * @return The UTF8 character point immediately before the index,
-     *         or null if the bytes before the index is not a valid UTF8 character.
-     */
-    @Nullable
-    public static Integer getUtf8CodePointBefore(byte[] data, int index) {
-        int characterByteCount = 0;
-        while (--index >= 0 && ++characterByteCount <= UTF8_MAX_BYTE_COUNT) {
-            if (isValidUtf8(data, index, characterByteCount)) {
-                return decodeUtf8ToCodePoint(data, index, characterByteCount);
-            }
-        }
-
-        return null;
     }
 
     /**
@@ -490,9 +358,6 @@ public abstract class BufferPhraseFilter extends Filter {
         public static final Source[] VALUES = values();
     }
 
-    /** YouTube video IDs are 11 chars from the base64-url alphabet. */
-    private static final int VIDEO_ID_LENGTH = 11;
-
     /** Byte sequence that precedes the video ID inside the buffer's thumbnail URL. */
     private static final byte[] THUMBNAIL_URL_PREFIX =
             "https://i.ytimg.com/vi/".getBytes(StandardCharsets.US_ASCII);
@@ -508,24 +373,15 @@ public abstract class BufferPhraseFilter extends Filter {
         final byte[] prefix = THUMBNAIL_URL_PREFIX;
         final int prefixLen = prefix.length;
         outer:
-        for (int i = 0, max = buffer.length - prefixLen - VIDEO_ID_LENGTH; i <= max; i++) {
+        for (int i = 0, max = buffer.length - prefixLen - BaseVideoInformation.VIDEO_ID_LENGTH; i <= max; i++) {
             for (int j = 0; j < prefixLen; j++) {
                 if (buffer[i + j] != prefix[j]) continue outer;
             }
             int start = i + prefixLen;
-            for (int k = 0; k < VIDEO_ID_LENGTH; k++) {
-                if (!isVideoIdChar(buffer[start + k])) continue outer;
-            }
-            return new String(buffer, start, VIDEO_ID_LENGTH, StandardCharsets.US_ASCII);
+            if (!BaseVideoInformation.isVideoId(buffer, start)) continue;
+            return new String(buffer, start, BaseVideoInformation.VIDEO_ID_LENGTH, StandardCharsets.US_ASCII);
         }
         return null;
-    }
-
-    private static boolean isVideoIdChar(byte b) {
-        return (b >= 'A' && b <= 'Z')
-                || (b >= 'a' && b <= 'z')
-                || (b >= '0' && b <= '9')
-                || b == '-' || b == '_';
     }
 
     /**

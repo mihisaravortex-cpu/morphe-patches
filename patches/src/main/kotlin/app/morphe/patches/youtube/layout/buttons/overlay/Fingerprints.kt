@@ -21,6 +21,7 @@ import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
 import app.morphe.patcher.resource.ResourceType
 import app.morphe.patcher.resourceLiteral
+import app.morphe.util.containsLiteralInstruction
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 
@@ -83,10 +84,18 @@ internal object CastButtonPlayerFeatureFlagFingerprint : Fingerprint(
     )
 )
 
+/**
+ * The method that chooses the toolbar Cast button or the Companion button also reads the flag,
+ * together with the flag of the Companion button. The toolbar buttons have their own settings
+ * (Navigation bar patch), so that method is not matched.
+ */
 internal object CastButtonActionFeatureFlagFingerprint : Fingerprint(
     filters = listOf(
         literal(45690090)
-    )
+    ),
+    custom = { method, _ ->
+        !method.containsLiteralInstruction(45826964L)
+    }
 )
 
 internal object InflateControlsGroupLayoutStubFingerprint : Fingerprint(

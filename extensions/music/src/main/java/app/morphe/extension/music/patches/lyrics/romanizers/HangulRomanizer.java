@@ -7,21 +7,41 @@
 
 package app.morphe.extension.music.patches.lyrics.romanizers;
 
+import androidx.annotation.Nullable;
+
+import java.util.Arrays;
+
 /**
- * Revised Romanization for Korean, written the way Google writes it, so that a line does not
- * change spelling between the online path and this one. Two conventions follow Google rather
- * than the textbook: a coda before a silent ㅇ is written out with a hyphen, as in 시간이
- * {@code sigan-i}, and ㄹ always reads as {@code l}.
- *
- * <p>The tables were read off the Unicode names of the jamo rather than typed, since the
- * nineteen initial slots start at ㄱ with the silent ㅇ at slot eleven and the coda slot the
- * formula produces is one higher than the jamo index it stands for.
- *
- * <p>Left out, because they need a morphological analysis rather than a romanization: tensing,
- * as in 빛나는 {@code bichnaneun}, and the extra {@code h} Google writes into some joins, as
- * in 않은.
+ * Revised Romanization for Korean, as Google writes it so both paths spell a line the same:
+ * a coda before a silent ㅇ is written out with a hyphen (시간이 {@code sigan-i}), ㄹ always reads
+ * as {@code l}, and the tables come from the Unicode jamo names. Tensing and Google's extra
+ * {@code h} joins are left out: they need morphological analysis, not a romanization.
  */
 public final class HangulRomanizer {
+
+    /** Spaces end a Korean phrase, so one run of Hangul stays in one cluster. */
+    @Nullable
+    public static int[] wordGroups(String line) {
+        if (line == null || line.isEmpty()) {
+            return null;
+        }
+        final int[] groups = new int[line.length()];
+        Arrays.fill(groups, -1);
+        int group = -1;
+        boolean inRun = false;
+        for (int i = 0; i < line.length(); i++) {
+            if (ScriptDetector.isHangul(line.charAt(i))) {
+                if (!inRun) {
+                    group++;
+                    inRun = true;
+                }
+                groups[i] = group;
+            } else {
+                inRun = false;
+            }
+        }
+        return group >= 0 ? groups : null;
+    }
 
     /** The silent {@code ㅇ} sits at index 11 and writes nothing. */
     private static final String[] INITIALS = {
@@ -61,11 +81,46 @@ public final class HangulRomanizer {
     }
 
     public static String romanize(String text) {
-        StringBuilder out = new StringBuilder(text.length() * 2);
+        return romanize(text, text);
+    }
+
+    /**
+     * The reading of {@code text}, which must be the opening of {@code line}.
+     *
+     * <p>A coda depends on the syllable after it, so a single syllable read alone would end where
+     * the line does not. A line fed to itself reads exactly as {@link #romanize(String)}.
+     */
+    public static String romanize(String text, String line) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        if (line == null || line.isEmpty()) {
+            return romanize(text);
+        }
+        if (line.startsWith(text)) {
+            return romanizeAt(line, 0, text.length());
+        }
+        int idx = line.indexOf(text);
+        if (idx >= 0) {
+            return romanizeAt(line, idx, idx + text.length());
+        }
+        return romanize(text);
+    }
+
+    /**
+     * Romanizes {@code line.substring(start, end)} while checking the true following character in
+     * {@code line} at {@code end} for coda liaison onto a silent {@code ㅇ}.
+     */
+    public static String romanizeAt(String line, int start, int end) {
+        if (line == null || start < 0 || end <= start || start >= line.length()) {
+            return "";
+        }
+        int safeEnd = Math.min(end, line.length());
+        StringBuilder out = new StringBuilder((safeEnd - start) * 2);
         int[] syllable = new int[3];
 
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
+        for (int i = start; i < safeEnd; i++) {
+            char c = line.charAt(i);
             if (!decompose(c, syllable)) {
                 out.append(c);
                 continue;
@@ -75,10 +130,12 @@ public final class HangulRomanizer {
             int coda = syllable[2];
             if (coda == NO_CODA) continue;
 
-            // A coda before a silent ㅇ is written out, and the hyphen marks the join.
-            char next = i + 1 < text.length() ? text.charAt(i + 1) : 0;
+            final char next = (i + 1 < line.length()) ? line.charAt(i + 1) : 0;
             if (startsOnSilent(next)) {
-                out.append(LATERAL[coda]).append('-');
+                out.append(LATERAL[coda]);
+                if (i + 1 < safeEnd) {
+                    out.append('-');
+                }
             } else {
                 out.append(FINALS[coda]);
             }
@@ -91,6 +148,7 @@ public final class HangulRomanizer {
         return (c - FIRST) / (MEDIAL_COUNT * CODA_COUNT) == SILENT;
     }
 
+    @SuppressWarnings("ConstantValue")
     private static boolean decompose(char c, int[] out) {
         if (c < FIRST || c > LAST) return false;
         int index = c - FIRST;

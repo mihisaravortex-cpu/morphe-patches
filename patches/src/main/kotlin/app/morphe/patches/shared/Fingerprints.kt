@@ -17,14 +17,9 @@ import app.morphe.patcher.methodCall
 import app.morphe.patcher.newInstance
 import app.morphe.patcher.opcode
 import app.morphe.patcher.string
+import app.morphe.util.findFieldFromToString
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
-
-internal object CastContextFetchFingerprint : Fingerprint(
-    filters = listOf(
-        string("Error fetching CastContext.")
-    )
-)
 
 internal object PrimeMethodFingerprint : Fingerprint(
     filters = listOf(
@@ -125,6 +120,8 @@ internal object MediaSessionSetMetadataFingerprint : Fingerprint(
 
 internal object MediaSessionSetPlaybackStateFingerprint : Fingerprint(
     filters = listOf(
+        // Extension classes also set the playback state, but have no callbacks to notify.
+        methodCall(smali = "Landroid/os/RemoteCallbackList;->beginBroadcast()I"),
         methodCall(
             definingClass = "Landroid/media/session/MediaSession;",
             name = "setPlaybackState",
@@ -199,6 +196,66 @@ internal object LithoSpannableStringCreationFingerprint : Fingerprint(
         methodCall(
             name = "addOnLayoutChangeListener",
             parameters = listOf($$"Landroid/view/View$OnLayoutChangeListener;"),
+        )
+    )
+)
+
+internal object VideoStreamingDataToStringFingerprint : Fingerprint(
+    name = "toString",
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "Ljava/lang/String;",
+    filters = listOf(
+        string("VideoStreamingData(itags=")
+    )
+)
+
+internal object VideoStreamingDataConstructorFingerprint : Fingerprint(
+    classFingerprint = VideoStreamingDataToStringFingerprint,
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.CONSTRUCTOR),
+    returnType = "V",
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = $$"Lcom/google/protos/youtube/api/innertube/StreamingDataOuterClass$StreamingData;"
+        ),
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = "this",
+            type = "Ljava/lang/String;"
+        ),
+        newInstance("Ljava/util/ArrayList;"),
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = $$"Lcom/google/protos/youtube/api/innertube/StreamingDataOuterClass$StreamingData;"
+        )
+    ),
+)
+
+private const val FIXED_RESOLUTION_STRING = ", initialPlaybackVideoQualityFixedResolution="
+
+/**
+ * The field of the initial video quality of the playback start parameters.
+ */
+internal fun initialResolutionField() =
+    PlaybackStartParametersToStringFingerprint.method.findFieldFromToString(FIXED_RESOLUTION_STRING)
+
+internal object PlaybackStartParametersToStringFingerprint : Fingerprint(
+    name = "toString",
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "Ljava/lang/String;",
+    parameters = listOf(),
+    filters = listOf(
+        string(FIXED_RESOLUTION_STRING)
+    )
+)
+
+internal object PlaybackStartParametersConstructorFingerprint : Fingerprint(
+    classFingerprint = PlaybackStartParametersToStringFingerprint,
+    name = "<init>",
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            reference = { initialResolutionField() }
         )
     )
 )

@@ -27,14 +27,11 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.preference.EditTextPreference;
-import android.preference.ListPreference;
 import android.preference.Preference;
 import android.preference.PreferenceFragment;
 import android.preference.PreferenceGroup;
 import android.preference.PreferenceManager;
 import android.preference.PreferenceScreen;
-import android.preference.SwitchPreference;
 import android.preference.TwoStatePreference;
 import android.text.InputType;
 import android.text.SpannableStringBuilder;
@@ -60,6 +57,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
@@ -72,8 +71,6 @@ import java.util.Collection;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
-import java.util.Scanner;
 import java.util.function.Consumer;
 
 import app.morphe.extension.shared.Logger;
@@ -82,7 +79,6 @@ import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.patches.SettingsNamePatch;
 import app.morphe.extension.shared.settings.BaseSettings;
-import app.morphe.extension.shared.settings.BooleanSetting;
 import app.morphe.extension.shared.settings.Setting;
 import app.morphe.extension.shared.settings.SharedSettings;
 import app.morphe.extension.shared.settings.preference.about.MorpheAboutPreference;
@@ -90,7 +86,7 @@ import app.morphe.extension.shared.theme.ThemeUtils;
 import app.morphe.extension.shared.ui.CustomDialog;
 import app.morphe.extension.shared.ui.Dim;
 
-@SuppressWarnings("deprecation")
+@SuppressWarnings({"unused", "deprecation"})
 public abstract class AbstractPreferenceFragment extends PreferenceFragment {
 
     private static void performToggleHaptic(View view, TwoStatePreference pref) {
@@ -226,7 +222,7 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
             Preference p = group.getPreference(i);
             // NoTitlePreferenceCategory reports its first child title so it can be sorted,
             // but that title is never shown to the user and must not appear in the path.
-            CharSequence title = (p instanceof NoTitlePreferenceCategory) ? null : p.getTitle();
+            CharSequence title = (p instanceof NoTitlePreferenceCategory) ? null : NewIndicatorSpan.removeFrom(p.getTitle());
             if (p == target) {
                 if (title != null) path.add(title);
                 return true;
@@ -251,20 +247,10 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
     public static WeakReference<AbstractPreferenceFragment> instance = new WeakReference<>(null);
 
     /**
-     * Indicates that if a preference changes,
-     * to apply the change from the Setting to the UI component.
+     * If a changed setting requires an app restart. The restart dialog is shown when the
+     * settings are closed, so multiple settings can be changed with only one restart.
      */
-    public static boolean settingImportInProgress;
-
-    /**
-     * Prevents recursive calls during preference <-> UI syncing from showing extra dialogs.
-     */
-    private static boolean updatingPreference;
-
-    /**
-     * Used to prevent showing reboot dialog, if user cancels a setting user dialog.
-     */
-    private static boolean showingUserDialogMessage;
+    private static boolean restartNeeded;
 
     /**
      * Confirm and restart dialog button text and title.
@@ -277,53 +263,43 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
     private int currentUiMode = -1;
     private static final int WRITE_TEXT_REQUEST_CODE = 45;
     private static final int READ_TEXT_REQUEST_CODE = 46;
+    private static final int PICK_FOLDER_REQUEST_CODE = 47;
+
+    /**
+     * Any file can be picked for import, and a larger file is rejected instead of running out of memory.
+     * The largest valid import is a series backup of 8 million characters, of at most 3 bytes each.
+     */
+    private static final int MAX_IMPORT_TEXT_BYTES = 24 * 1024 * 1024;
+    private static final int IMPORT_BUFFER_BYTES = 8 * 1024;
 
     private String existingSettings = "";
 
     private Collection<String> pendingLinesToExport = null;
     private Consumer<Boolean> pendingTextExportResult = null;
     private Consumer<String> pendingTextImportResult = null;
+    private Consumer<Uri> pendingFolderResult = null;
 
     private EditText currentImportExportEditText;
     private Dialog currentImportExportDialog = null;
     private Dialog currentLogDialog = null;
 
+    /**
+     * The preferences save the settings, and so does other code, such as an import. Whatever saved
+     * it, the preference of a changed setting shows its value again, and the others their availability.
+     */
     private final SharedPreferences.OnSharedPreferenceChangeListener listener =
-            (sharedPreferences, str) -> {
+            (sharedPreferences, key) -> {
                 try {
-                    if (updatingPreference) {
-                        Logger.printDebug(() -> "Ignoring preference change as sync is in progress");
+                    if (key == null) {
+                        // Cleared, which settings never do.
                         return;
                     }
-
-                    Setting<?> setting = Setting.getSettingFromPath(Objects.requireNonNull(str));
-                    if (setting == null) {
-                        return;
-                    }
-                    Preference pref = findPreference(str);
-                    if (pref == null) {
-                        return;
-                    }
-                    Logger.printDebug(() -> "Preference changed: " + setting.key);
-
-                    if (!settingImportInProgress && !showingUserDialogMessage) {
-                        if (setting.userDialogMessage != null && !prefIsSetToDefault(pref, setting)) {
-                            // Do not change the setting yet, to allow preserving whatever
-                            // list/text value was previously set if it needs to be reverted.
-                            showSettingUserDialogConfirmation(pref, setting);
-                            return;
-                        } else if (setting.rebootApp) {
-                            showRestartDialog(getContext());
-                        }
+                    if (findPreference(key) instanceof SettingPreference preference) {
+                        preference.updateFromSetting();
                     }
 
-                    updatingPreference = true;
-                    // Apply 'Setting <- Preference', unless during importing when it needs to be 'Setting -> Preference'.
-                    // Updating here can cause a recursive call back into this same method.
-                    updatePreference(pref, setting, true, settingImportInProgress);
-                    // Update any other preference availability that may now be different.
-                    updateUIAvailability();
-                    updatingPreference = false;
+                    // Updates Preferences availability only using the status of the settings.
+                    updatePreferenceScreen(getPreferenceScreen(), false);
                 } catch (Exception ex) {
                     Logger.printException(() -> "OnSharedPreferenceChangeListener failure", ex);
                 }
@@ -351,192 +327,69 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
         addPreferencesFromResource(identifier);
 
         PreferenceScreen screen = getPreferenceScreen();
+        // Before sorting, which goes by the translated titles.
+        PreferenceTranslations.translate(getResources(), identifier, screen);
         sortPreferenceGroups(screen);
         Utils.setPreferenceTitlesToMultiLine(screen);
     }
 
-    private void showSettingUserDialogConfirmation(Preference pref, Setting<?> setting) {
-        Utils.verifyOnMainThread();
-
-        final var context = getContext();
-        if (confirmDialogTitle == null) {
-            confirmDialogTitle = str("morphe_settings_confirm_user_dialog_title");
-        }
-
-        showingUserDialogMessage = true;
-
-        CharSequence message = BulletPointPreference.formatIntoBulletPoints(
-                Objects.requireNonNull(setting.userDialogMessage).toString());
-
-        Pair<Dialog, LinearLayout> dialogPair = CustomDialog.create(
-                context,
-                confirmDialogTitle, // Title.
-                message,
-                null, // No EditText.
-                null, // OK button text.
-                () -> {
-                    // OK button action. User confirmed, save to the Setting.
-                    updatePreference(pref, setting, true, false);
-
-                    // Update availability of other preferences that may be changed.
-                    updateUIAvailability();
-
-                    if (setting.rebootApp) {
-                        showRestartDialog(context);
-                    }
-                },
-                () -> {
-                    // Cancel button action. Restore whatever the setting was before the change.
-                    updatePreference(pref, setting, true, true);
-                },
-                null, // No Neutral button.
-                null, // No Neutral button action.
-                true  // Dismiss dialog when onNeutralClick.
-        );
-
-        dialogPair.first.setOnDismissListener(d -> showingUserDialogMessage = false);
-        dialogPair.first.setCancelable(false);
-
-        // Show the dialog.
-        dialogPair.first.show();
-    }
-
-    /**
-     * Updates all Preferences values and their availability using the current values in {@link Setting}.
-     */
-    protected void updateUIToSettingValues() {
-        updatePreferenceScreen(getPreferenceScreen(), true, true);
-    }
-
-    /**
-     * Updates Preferences availability only using the status of {@link Setting}.
-     */
-    protected void updateUIAvailability() {
-        updatePreferenceScreen(getPreferenceScreen(), false, false);
-    }
-
-    /**
-     * @return If the preference is currently set to the default value of the Setting.
-     */
-    protected boolean prefIsSetToDefault(Preference pref, Setting<?> setting) {
-        Object defaultValue = setting.defaultValue;
-        if (pref instanceof SwitchPreference switchPref) {
-            return switchPref.isChecked() == (Boolean) defaultValue;
-        }
-        String defaultValueString = defaultValue.toString();
-        if (pref instanceof EditTextPreference editPreference) {
-            return editPreference.getText().equals(defaultValueString);
-        }
-        if (pref instanceof ListPreference listPref) {
-            return listPref.getValue().equals(defaultValueString);
-        }
-
-        throw new IllegalStateException("Must override method to handle preference type: " + pref.getClass());
-    }
-
     /**
      * Syncs all UI Preferences to any {@link Setting} they represent.
+     *
+     * @param updateValues If the preferences show the values of the settings again,
+     *                     and not only their availability.
      */
-    private void updatePreferenceScreen(@NonNull PreferenceGroup group,
-                                        boolean syncSettingValue,
-                                        boolean applySettingToPreference) {
+    private void updatePreferenceScreen(PreferenceGroup group, boolean updateValues) {
         // Alternatively this could iterate through all Settings and check for any matching Preferences,
         // but there are many more Settings than UI preferences so it's more efficient to only check
         // the Preferences.
         for (int i = 0, prefCount = group.getPreferenceCount(); i < prefCount; i++) {
             Preference pref = group.getPreference(i);
             if (pref instanceof PreferenceGroup subGroup) {
-                updatePreferenceScreen(subGroup, syncSettingValue, applySettingToPreference);
+                updatePreferenceScreen(subGroup, updateValues);
             } else if (pref.hasKey()) {
+                if (updateValues && pref instanceof SettingPreference settingPreference) {
+                    settingPreference.updateFromSetting();
+                    continue;
+                }
+
                 String key = pref.getKey();
                 Setting<?> setting = Setting.getSettingFromPath(key);
-
                 if (setting != null) {
-                    updatePreference(pref, setting, syncSettingValue, applySettingToPreference);
-                } else if (BaseSettings.DEBUG.get() && (pref instanceof SwitchPreference
-                        || pref instanceof EditTextPreference || pref instanceof ListPreference)) {
-                    // Probably a typo in the patches preference declaration.
-                    Logger.printException(() -> "Preference key has no setting: " + key);
+                    pref.setEnabled(setting.isAvailable());
                 }
             }
         }
     }
 
     /**
-     * Handles syncing a UI Preference with the {@link Setting} that backs it.
-     * If needed, subclasses can override this to handle additional UI Preference types.
-     *
-     * @param applySettingToPreference If true, then apply {@link Setting} -> Preference.
-     *                                 If false, then apply {@link Setting} <- Preference.
+     * Marks that a changed setting requires an app restart.
+     * The restart dialog is shown when the settings are closed.
      */
-    protected void syncSettingWithPreference(@NonNull Preference pref,
-                                             @NonNull Setting<?> setting,
-                                             boolean applySettingToPreference) {
-        if (pref instanceof SwitchPreference switchPref) {
-            // Skip sync when the Setting's backing type does not match SwitchPreference's boolean model.
-            // The preference overrides persistBoolean/getPersistedBoolean and maps the boolean
-            // to a non-boolean backing on its own.
-            if (!(setting instanceof BooleanSetting boolSetting)) {
-                return;
-            }
-            if (applySettingToPreference) {
-                switchPref.setChecked(boolSetting.get());
-            } else {
-                BooleanSetting.privateSetValue(boolSetting, switchPref.isChecked());
-            }
-        } else if (pref instanceof EditTextPreference editPreference) {
-            if (applySettingToPreference) {
-                editPreference.setText(setting.get().toString());
-            } else {
-                Setting.privateSetValueFromString(setting, editPreference.getText());
-            }
-        } else if (pref instanceof ListPreference listPref) {
-            if (applySettingToPreference) {
-                listPref.setValue(setting.get().toString());
-            } else {
-                Setting.privateSetValueFromString(setting, listPref.getValue());
-            }
-            updateListPreferenceSummary(listPref, setting);
-        }
+    public static void setRestartNeeded() {
+        restartNeeded = true;
     }
 
     /**
-     * Updates a UI Preference with the {@link Setting} that backs it.
+     * Shows the restart dialog if a changed setting requires an app restart.
+     * Must be called when the user closes the settings.
      *
-     * @param syncSetting If the UI should be synced {@link Setting} <-> Preference
-     * @param applySettingToPreference If true, then apply {@link Setting} -> Preference.
-     *                                 If false, then apply {@link Setting} <- Preference.
+     * @return If the dialog is shown, and the settings must not close yet.
      */
-    private void updatePreference(@NonNull Preference pref, @NonNull Setting<?> setting,
-                                  boolean syncSetting, boolean applySettingToPreference) {
-        if (!syncSetting && applySettingToPreference) {
-            throw new IllegalArgumentException();
+    public static boolean showRestartDialogIfNeeded(Context context) {
+        if (!restartNeeded) {
+            return false;
         }
+        restartNeeded = false;
 
-        if (syncSetting) {
-            syncSettingWithPreference(pref, setting, applySettingToPreference);
-        }
-
-        updatePreferenceAvailability(pref, setting);
+        showRestartDialog(context);
+        return true;
     }
 
-    protected void updatePreferenceAvailability(@NonNull Preference pref, @NonNull Setting<?> setting) {
-        pref.setEnabled(setting.isAvailable());
-    }
-
-    protected void updateListPreferenceSummary(ListPreference listPreference, Setting<?> setting) {
-        String objectStringValue = setting.get().toString();
-        final int entryIndex = listPreference.findIndexOfValue(objectStringValue);
-        if (entryIndex >= 0) {
-            listPreference.setSummary(listPreference.getEntries()[entryIndex]);
-        } else {
-            // Value is not an available option.
-            // User manually edited import data, or options changed and current selection is no longer available.
-            // Still show the value in the summary, so it's clear that something is selected.
-            listPreference.setSummary(objectStringValue);
-        }
-    }
-
+    /**
+     * Shows a dialog that restarts the app when it is closed in any way,
+     * including the back button.
+     */
     public static void showRestartDialog(Context context) {
         Utils.verifyOnMainThread();
         if (restartDialogTitle == null) {
@@ -555,15 +408,16 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
                 restartDialogMessage,            // Message.
                 null,                            // No EditText.
                 restartDialogButtonText,         // OK button text.
-                () -> Utils.restartApp(context), // OK button action.
-                () -> {},                        // Cancel button action (dismiss only).
+                () -> {},                        // OK button action (dismiss restarts).
+                null,                            // No Cancel button.
                 null,                            // No Neutral button text.
                 null,                            // No Neutral button action.
                 true                             // Dismiss dialog when onNeutralClick.
         );
 
-        // Show the dialog.
-        dialogPair.first.show();
+        Dialog dialog = dialogPair.first;
+        dialog.setOnDismissListener(d -> Utils.restartApp(context));
+        dialog.show();
     }
 
     /**
@@ -593,7 +447,7 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
                     // OK button text.
                     str("morphe_settings_save"),
                     // OK button action.
-                    () -> importSettingsText(context, currentImportExportEditText.getText().toString()),
+                    () -> importSettingsText(currentImportExportEditText.getText().toString()),
                     // Cancel button action (dismiss only).
                     () -> {},
                     // Neutral button (Copy) text.
@@ -690,7 +544,7 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
                 showLocalizedToast("morphe_settings_import_file_success",
                         "Settings imported successfully, tap Save to apply");
             } else {
-                importSettingsText(getContext(), text);
+                importSettingsText(text);
             }
         });
     }
@@ -750,6 +604,22 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
         }
     }
 
+    /**
+     * Opens the folder picker, for preferences that save files to a folder.
+     *
+     * @param onResult Called with the tree uri of the folder. Not called if the user picks no folder.
+     */
+    public void pickFolderActivity(Consumer<Uri> onResult) {
+        try {
+            pendingFolderResult = onResult;
+
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            startActivityForResult(intent, PICK_FOLDER_REQUEST_CODE);
+        } catch (Exception ex) {
+            Logger.printException(() -> "pickFolderActivity failure", ex);
+        }
+    }
+
     private void saveTextToUri(Uri uri) {
         if (pendingTextExportResult == null || pendingLinesToExport == null) return;
 
@@ -779,15 +649,13 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
         pendingTextExportResult = null;
     }
 
-    @SuppressWarnings("CharsetObjectCanBeUsed")
     private void readTextFromUri(Uri uri) {
         if (pendingTextImportResult == null) return;
 
         String text = null;
         try (InputStream in = getContext().getContentResolver().openInputStream(uri)) {
             if (in != null) {
-                Scanner scanner = new Scanner(in, StandardCharsets.UTF_8.name()).useDelimiter("\\A");
-                text = scanner.hasNext() ? scanner.next() : "";
+                text = readImportText(in);
             }
         } catch (Exception ex) {
             Logger.printException(() -> "readTextFromUri failure", ex);
@@ -797,9 +665,29 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
         pendingTextImportResult = null;
     }
 
+    /**
+     * @return The text of the stream, or null if it is larger than {@link #MAX_IMPORT_TEXT_BYTES}.
+     */
+    @Nullable
+    @SuppressWarnings("CharsetObjectCanBeUsed")
+    private static String readImportText(InputStream in) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        byte[] buffer = new byte[IMPORT_BUFFER_BYTES];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            if (bytes.size() + read > MAX_IMPORT_TEXT_BYTES) {
+                Logger.printInfo(() -> "Import file is too large");
+                return null;
+            }
+            bytes.write(buffer, 0, read);
+        }
+
+        return bytes.toString(StandardCharsets.UTF_8.name());
+    }
+
     private void exportToClipboard(String logsToExport) {
         try {
-            if (!BaseSettings.DEBUG.get()) {
+            if (!Logger.isDebugEnabled()) {
                 Utils.showToastShort(str("morphe_debug_logs_disabled"));
                 return;
             }
@@ -820,7 +708,7 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
     }
 
     private void exportToFile(Collection<String> logsToExport) {
-        if (!BaseSettings.DEBUG.get() || logsToExport == null || logsToExport.isEmpty()) {
+        if (!Logger.isDebugEnabled() || logsToExport == null || logsToExport.isEmpty()) {
             Utils.showToastShort(str("morphe_debug_logs_none_found"));
             return;
         }
@@ -863,14 +751,6 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
             allLogs.clear();
             filteredLogs.clear();
             notifyDataSetChanged();
-        }
-
-        /**
-         * @return The list of logs matching the current search filter (used for zero-copy file streaming).
-         */
-        @NonNull
-        List<String> getFilteredLogs() {
-            return filteredLogs;
         }
 
         /**
@@ -952,7 +832,7 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
             }
 
             Context context = getContext();
-            if (!BaseSettings.DEBUG.get()) {
+            if (!Logger.isDebugEnabled()) {
                 Utils.showToastShort(str("morphe_debug_logs_disabled"));
                 return;
             }
@@ -1019,7 +899,7 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
 
             Button buttonExport = CustomDialog.createButton(context, dialogPair.first,
                     str("morphe_settings_export_file"),
-                    () -> exportToFile(logAdapter.getFilteredLogs()),
+                    () -> exportToFile(logAdapter.filteredLogs),
                     false, true);
 
             LinearLayout.LayoutParams buttonExportParams = new LinearLayout.LayoutParams(
@@ -1058,6 +938,9 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
             saveTextToUri(data.getData());
         } else if (requestCode == READ_TEXT_REQUEST_CODE && resultCode == Activity.RESULT_OK && data != null) {
             readTextFromUri(data.getData());
+        } else if (requestCode == PICK_FOLDER_REQUEST_CODE && resultCode == Activity.RESULT_OK && data != null
+                && data.getData() != null && pendingFolderResult != null) {
+            pendingFolderResult.accept(data.getData());
         }
     }
 
@@ -1069,21 +952,18 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
         }
     }
 
-    private void importSettingsText(Context context, String replacementSettings) {
+    private void importSettingsText(String replacementSettings) {
         try {
             existingSettings = Setting.exportToJson(null);
             if (replacementSettings.equals(existingSettings)) {
                 return;
             }
-            settingImportInProgress = true;
             final boolean rebootNeeded = Setting.importFromJSON(getActivity(), replacementSettings);
             if (rebootNeeded) {
-                showRestartDialog(context);
+                setRestartNeeded();
             }
         } catch (Exception ex) {
             Logger.printException(() -> "importSettingsText failure", ex);
-        } finally {
-            settingImportInProgress = false;
         }
     }
 
@@ -1107,7 +987,11 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
                     if (activity != null) {
                         Intent intent = activity.getIntent();
                         intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                        // Activity is recreated and not closed, so do not show the restart dialog yet.
+                        final boolean restartWasNeeded = restartNeeded;
+                        restartNeeded = false;
                         activity.finish();
+                        restartNeeded = restartWasNeeded;
                         activity.overridePendingTransition(0, 0);
                         startActivity(intent);
                         activity.overridePendingTransition(0, 0);
@@ -1131,7 +1015,8 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
             // otherwise the syncing of Setting -> UI
             // causes a callback to the listener even though nothing changed.
             initialize();
-            updateUIToSettingValues();
+            // Updates all Preferences values and their availability using the current values of the settings.
+            updatePreferenceScreen(getPreferenceScreen(), true);
 
             preferenceManager.getSharedPreferences().registerOnSharedPreferenceChangeListener(listener);
         } catch (Exception ex) {
@@ -1187,7 +1072,7 @@ public abstract class AbstractPreferenceFragment extends PreferenceFragment {
             final String sortValue;
             switch (preferenceSort) {
                 case BY_TITLE:
-                    sortValue = Utils.removePunctuationToLowercase(preference.getTitle());
+                    sortValue = Utils.removePunctuationToLowercase(NewIndicatorSpan.removeFrom(preference.getTitle()));
                     break;
                 case BY_KEY:
                     String key = preference.getKey();

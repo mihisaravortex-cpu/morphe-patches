@@ -9,6 +9,8 @@ package app.morphe.extension.youtube.patches.utils.requests;
 
 import android.os.Build;
 
+import androidx.annotation.Nullable;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -18,8 +20,13 @@ import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.requests.Requester;
 import app.morphe.extension.shared.requests.Route;
 
@@ -33,6 +40,8 @@ public final class PlaylistRoutes {
     private static final String PACKAGE_NAME = "com.google.android.youtube";
 
     private static final int CONNECTION_TIMEOUT_MILLISECONDS = 10 * 1000;
+
+    private static final int MAX_MILLISECONDS_TO_WAIT_FOR_FETCH = 20 * 1000;
 
     public static final Route.CompiledRoute CREATE_PLAYLIST = new Route(
             Route.Method.POST, "playlist/create?prettyPrint=false"
@@ -54,6 +63,38 @@ public final class PlaylistRoutes {
             Route.Method.POST, "browse?prettyPrint=false"
     ).compile();
 
+    private static final String PLAYLIST_VIDEO_FIELDS =
+            "contents.playlistVideoRenderer(videoId,setVideoId),continuations";
+    private static final String PLAYLIST_VIDEO_LIST_FIELDS =
+            "playlistVideoListRenderer(" + PLAYLIST_VIDEO_FIELDS + ")";
+
+    /**
+     * The ids of the videos of a playlist. Without the mask, a page of 20 videos is about 2 MB.
+     */
+    public static final Route.CompiledRoute BROWSE_PLAYLIST_VIDEO_IDS = new Route(
+            Route.Method.POST,
+            "browse?fields=contents.singleColumnBrowseResultsRenderer.tabs.tabRenderer.content.sectionListRenderer"
+                    + ".contents(" + PLAYLIST_VIDEO_LIST_FIELDS + ",itemSectionRenderer.contents." + PLAYLIST_VIDEO_LIST_FIELDS + ")"
+                    + ",continuationContents.playlistVideoListContinuation(" + PLAYLIST_VIDEO_FIELDS + ")&prettyPrint=false"
+    ).compile();
+
+    private static final String PLAYLIST_SEARCH_VIDEO_FIELDS =
+            "contents.playlistVideoRenderer(videoId,title,thumbnail,lengthText,shortBylineText.runs.text,videoInfo)"
+                    + ",continuations";
+    private static final String PLAYLIST_SEARCH_VIDEO_LIST_FIELDS =
+            "playlistVideoListRenderer(" + PLAYLIST_SEARCH_VIDEO_FIELDS + ")";
+
+    /**
+     * The title of a playlist, and the videos of a playlist with what is shown of them in the playlist.
+     */
+    public static final Route.CompiledRoute BROWSE_PLAYLIST_SEARCH_VIDEOS = new Route(
+            Route.Method.POST,
+            "browse?fields=header.pageHeaderRenderer.pageTitle"
+                    + ",contents.singleColumnBrowseResultsRenderer.tabs.tabRenderer.content.sectionListRenderer"
+                    + ".contents(" + PLAYLIST_SEARCH_VIDEO_LIST_FIELDS + ",itemSectionRenderer.contents." + PLAYLIST_SEARCH_VIDEO_LIST_FIELDS + ")"
+                    + ",continuationContents.playlistVideoListContinuation(" + PLAYLIST_SEARCH_VIDEO_FIELDS + ")&prettyPrint=false"
+    ).compile();
+
     public static final Route.CompiledRoute GET_MIX_PLAYLIST = new Route(
             Route.Method.POST,
             "next" +
@@ -65,6 +106,20 @@ public final class PlaylistRoutes {
                     "playlist.playlist.contents.playlistPanelVideoRenderer." +
                     "navigationEndpoint.watchEndpoint.playerParams" +
                     "&prettyPrint=false"
+    ).compile();
+
+    /**
+     * The urls that report the playback of a video, which add the video to the watch history.
+     */
+    public static final Route.CompiledRoute GET_PLAYBACK_TRACKING = new Route(
+            Route.Method.POST, "player?fields=playbackTracking&prettyPrint=false"
+    ).compile();
+
+    /**
+     * The engagement panels of the watch page of a video, such as the comments panel, as proto.
+     */
+    public static final Route.CompiledRoute GET_ENGAGEMENT_PANELS = new Route(
+            Route.Method.POST, "next?fields=engagementPanels&alt=proto"
     ).compile();
 
     private PlaylistRoutes() {
@@ -112,8 +167,18 @@ public final class PlaylistRoutes {
     }
 
     public static byte[] getSetVideoIdBody(String videoId, String playlistId) {
+        return getSetVideoIdBody(videoId, playlistId, null);
+    }
+
+    /** Localized display metadata, while existing playlist-edit callers keep their context. */
+    public static byte[] getSetVideoIdBody(String videoId, String playlistId, @Nullable Locale locale) {
         try {
             JSONObject body = getBaseContentJson();
+            if (locale != null) {
+                JSONObject client = body.getJSONObject("context").getJSONObject("client");
+                client.put("hl", locale.toLanguageTag());
+                client.put("gl", locale.getCountry());
+            }
             body.put("videoId", videoId);
             body.put("playlistId", playlistId);
             return body.toString().getBytes(StandardCharsets.UTF_8);
@@ -146,6 +211,33 @@ public final class PlaylistRoutes {
         return new byte[0];
     }
 
+    /**
+     * @param predecessorSetVideoId The entry to move the video after,
+     *                              or null to move the video to the start of the playlist.
+     */
+    public static byte[] moveVideoBody(String playlistId, String setVideoId, @Nullable String predecessorSetVideoId) {
+        try {
+            JSONObject body = getBaseContentJson();
+            body.put("playlistId", playlistId);
+
+            JSONObject action = new JSONObject();
+            action.put("action", "ACTION_MOVE_VIDEO_AFTER");
+            action.put("setVideoId", setVideoId);
+            // Without a predecessor the video is moved to the start.
+            // ACTION_MOVE_VIDEO_TO_BEGINNING fails with code 500.
+            if (predecessorSetVideoId != null) {
+                action.put("movedSetVideoIdPredecessor", predecessorSetVideoId);
+            }
+            JSONArray actions = new JSONArray();
+            actions.put(action);
+            body.put("actions", actions);
+            return body.toString().getBytes(StandardCharsets.UTF_8);
+        } catch (JSONException ex) {
+            Logger.printException(() -> "moveVideoBody failed", ex);
+        }
+        return new byte[0];
+    }
+
     public static byte[] getPlaylistsBody(String playlistId) {
         try {
             JSONObject body = getBaseContentJson();
@@ -154,6 +246,17 @@ public final class PlaylistRoutes {
             return body.toString().getBytes(StandardCharsets.UTF_8);
         } catch (JSONException ex) {
             Logger.printException(() -> "getPlaylistsBody failed", ex);
+        }
+        return new byte[0];
+    }
+
+    public static byte[] videoBody(String videoId) {
+        try {
+            JSONObject body = getBaseContentJson();
+            body.put("videoId", videoId);
+            return body.toString().getBytes(StandardCharsets.UTF_8);
+        } catch (JSONException ex) {
+            Logger.printException(() -> "videoBody failed", ex);
         }
         return new byte[0];
     }
@@ -182,6 +285,18 @@ public final class PlaylistRoutes {
         return new byte[0];
     }
 
+    public static byte[] browseContinuationBody(String continuation) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("context", androidContext());
+            body.put("continuation", continuation);
+            return body.toString().getBytes(StandardCharsets.UTF_8);
+        } catch (JSONException ex) {
+            Logger.printException(() -> "browseContinuationBody failed", ex);
+        }
+        return new byte[0];
+    }
+
     public static byte[] savePlaylistBody(String playlistId, String libraryId) {
         try {
             JSONObject body = getBaseContentJson();
@@ -200,15 +315,17 @@ public final class PlaylistRoutes {
         return new byte[0];
     }
 
-    public static HttpURLConnection getConnection(Route.CompiledRoute route, Map<String, String> authHeaders) throws IOException {
-        String userAgent = String.format(Locale.US,
+    public static String getUserAgent() {
+        return String.format(Locale.US,
                 "%s/%s (Linux; U; Android %s; %s; %s Build/%s)",
                 PACKAGE_NAME, CLIENT_VERSION, Build.VERSION.RELEASE,
                 Locale.getDefault(), Build.MODEL, Build.ID);
+    }
 
+    public static HttpURLConnection getConnection(Route.CompiledRoute route, Map<String, String> authHeaders) throws IOException {
         HttpURLConnection connection = Requester.getConnectionFromCompiledRoute(YT_API_URL, route);
         connection.setRequestProperty("Content-Type", "application/json");
-        connection.setRequestProperty("User-Agent", userAgent);
+        connection.setRequestProperty("User-Agent", getUserAgent());
         connection.setRequestProperty("X-YouTube-Client-Name", String.valueOf(CLIENT_ID));
         connection.setRequestProperty("X-YouTube-Client-Version", CLIENT_VERSION);
         connection.setRequestProperty("X-GOOG-API-FORMAT-VERSION", "2");
@@ -227,5 +344,31 @@ public final class PlaylistRoutes {
         }
 
         return connection;
+    }
+
+    /**
+     * @param name The name of the result in the log.
+     * @return The result of a playlist request, or null if it failed or did not finish in time.
+     */
+    @Nullable
+    static <T> T getResult(Future<T> future, String name) {
+        try {
+            Logger.printExceptionIfDebug(() -> !future.isDone() && Utils.isCurrentlyOnMainThread()
+                    ? "Debug: Blocking main thread"
+                    : null);
+            return future.get(MAX_MILLISECONDS_TO_WAIT_FOR_FETCH, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException ex) {
+            Logger.printInfo(() -> name + " timed out", ex);
+        } catch (InterruptedException ex) {
+            Logger.printException(() -> name + " interrupted", ex);
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException ex) {
+            Logger.printException(() -> name + " failure", ex);
+        }
+        return null;
+    }
+
+    static void handleConnectionError(String message, @Nullable Exception ex) {
+        Logger.printInfo(() -> message, ex);
     }
 }

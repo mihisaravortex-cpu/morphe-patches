@@ -8,6 +8,9 @@
 package app.morphe.patches.youtube.layout.playlistautoplay
 
 import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
+import app.morphe.patcher.fieldAccess
+import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
 import app.morphe.patcher.string
 import com.android.tools.smali.dexlib2.AccessFlags
@@ -26,4 +29,49 @@ internal object NavigationIntentEnumFingerprint : Fingerprint(
     custom = { _, classDef ->
         classDef.methods.any { it.name == "<init>" && it.parameterTypes.size > 2 }
     },
+)
+
+internal object NativeNavigationStateFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.CONSTRUCTOR),
+    // Previous video available, next video available, repeat mode, shuffle enabled
+    parameters = listOf("Z", "Z", "I", "Z"),
+    filters = listOf(
+        fieldAccess(opcode = Opcode.IPUT_BOOLEAN, definingClass = "this"),
+        fieldAccess(opcode = Opcode.IPUT_BOOLEAN, definingClass = "this", location = MatchAfterImmediately()),
+        fieldAccess(opcode = Opcode.IPUT, definingClass = "this", location = MatchAfterImmediately()),
+        fieldAccess(opcode = Opcode.IPUT_BOOLEAN, definingClass = "this", location = MatchAfterImmediately()),
+        opcode(Opcode.RETURN_VOID, location = MatchAfterImmediately()),
+    ),
+)
+
+/**
+ * Constructor of the navigation request, which has the navigation intent and the video to play.
+ */
+internal object NavigationRequestFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.CONSTRUCTOR),
+    parameters = { listOf(NavigationIntentEnumFingerprint.originalClassDef.type, "L", "L") }
+)
+
+/**
+ * Method of the playback queue that picks the queue item for a navigation request.
+ * A playlist from the server is loaded into this queue.
+ */
+internal fun queueNavigationItemFingerprint(requestType: String, enumType: String) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PROTECTED, AccessFlags.FINAL),
+    returnType = "L",
+    parameters = listOf(requestType),
+    filters = listOf(
+        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = requestType, type = enumType),
+        methodCall(definingClass = enumType, name = "ordinal"),
+    )
+)
+
+/**
+ * Each implementation of the navigation method. These share no common instructions
+ * (some are empty or only delegate), so the request parameter is what identifies them.
+ */
+internal fun navigationMethodFingerprint(requestType: String) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf(requestType)
 )

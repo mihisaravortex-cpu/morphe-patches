@@ -16,17 +16,20 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Context;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.preference.PreferenceFragment;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
 import android.widget.Toolbar;
+import android.window.OnBackInvokedDispatcher;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.ResourceType;
 import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.patches.SettingsNamePatch;
+import app.morphe.extension.shared.settings.preference.AbstractPreferenceFragment;
 import app.morphe.extension.shared.settings.preference.ToolbarPreferenceFragment;
 import app.morphe.extension.shared.theme.ThemeUtils;
 import app.morphe.extension.shared.ui.Dim;
@@ -39,8 +42,7 @@ import app.morphe.extension.shared.ui.Dim;
 public abstract class BaseActivityHook extends Activity {
 
     public static final String MORPHE_SETTINGS_INTENT = "morphe_settings_intent";
-    public static final String MORPHE_DOWNLOADS_INTENT = "morphe_downloads_intent";
-    private static final int ID_MORPHE_SETTINGS_FRAGMENTS =
+    protected static final int ID_MORPHE_SETTINGS_FRAGMENTS =
             ResourceUtils.getIdentifierOrThrow(ResourceType.ID, "morphe_settings_fragments");
     private static final int ID_MORPHE_TOOLBAR_PARENT =
             ResourceUtils.getIdentifierOrThrow(ResourceType.ID, "morphe_toolbar_parent");
@@ -77,17 +79,16 @@ public abstract class BaseActivityHook extends Activity {
 
             // Sanity check.
             String dataString = activity.getIntent().getDataString();
-            if (!MORPHE_SETTINGS_INTENT.equals(dataString)
-                    && !MORPHE_DOWNLOADS_INTENT.equals(dataString)) {
+            if (!MORPHE_SETTINGS_INTENT.equals(dataString)) {
                 Logger.printException(() -> "Unknown intent: " + dataString);
                 return;
             }
 
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                     && !ENABLE_PREDICTIVE_BACK_ANIMATION) {
                 activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                        android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                        activity::finish
+                        OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                        () -> closeSettings(activity)
                 );
             }
 
@@ -100,6 +101,15 @@ public abstract class BaseActivityHook extends Activity {
                     .commit();
         } catch (Exception ex) {
             Logger.printException(() -> "initialize failure", ex);
+        }
+    }
+
+    /**
+     * Closes the settings, after first showing the restart dialog if a changed setting requires it.
+     */
+    public static void closeSettings(Activity activity) {
+        if (!AbstractPreferenceFragment.showRestartDialogIfNeeded(activity)) {
+            activity.finish();
         }
     }
 
@@ -156,6 +166,7 @@ public abstract class BaseActivityHook extends Activity {
     /**
      * Returns the resource ID for the content view layout.
      */
+    @SuppressWarnings("SameReturnValue")
     protected int getContentViewResourceId() {
         return LAYOUT_MORPHE_SETTINGS_WITH_TOOLBAR;
     }

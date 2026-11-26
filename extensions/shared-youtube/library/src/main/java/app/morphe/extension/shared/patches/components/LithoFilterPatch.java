@@ -13,47 +13,164 @@ package app.morphe.extension.shared.patches.components;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import java.nio.ByteBuffer;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.WireFormat;
+
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.StringTrieSearch;
-import app.morphe.extension.shared.settings.BaseSettings;
+import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.settings.SharedYouTubeSettings;
 
 @SuppressWarnings("unused")
 public final class LithoFilterPatch {
 
     /**
-     * Simple wrapper to pass the litho parameters through the prefix search.
+     * What {@link SharedYouTubeSettings#DEBUG_LITHO} logs of each Litho component.
      */
-    private record LithoFilterParameters(ContextInterface contextInterface, String identifier,
-                                         CharSequence path, String accessibility, byte[] buffer,
-                                         BufferAsciiStrings asciiStrings) {
+    public enum LithoLogging {
+        DISABLED,
+        /**
+         * Identifier, accessibility and path.
+         */
+        PATH,
+        /**
+         * Identifier, accessibility, path and the strings of the buffer.
+         */
+        PATH_AND_BUFFER
+    }
+
+    /**
+     * Simple wrapper to pass the litho parameters through the prefix search,
+     * computing accessibility string and buffer ascii strings lazily only when needed.
+     */
+    private static final class LithoFilterParameters {
+        final ContextInterface contextInterface;
+        final String identifier;
+        final CharSequence path;
+        @Nullable
+        private final String accessibilityId;
+        @Nullable
+        private final String accessibilityText;
+        private String accessibility;
+        @Nullable
+        private final Object element;
+        @Nullable
+        private byte[] buffer;
+        private BufferAsciiStrings asciiStrings;
+
+        LithoFilterParameters(ContextInterface contextInterface,
+                              String identifier,
+                              CharSequence path,
+                              @Nullable String accessibilityId,
+                              @Nullable String accessibilityText,
+                              @Nullable Object element) {
+            this.contextInterface = contextInterface;
+            this.identifier = identifier;
+            this.path = path;
+            this.accessibilityId = accessibilityId;
+            this.accessibilityText = accessibilityText;
+            this.element = element;
+        }
+
+        /**
+         * The bytes of the element are encoded from its native message only when a filter
+         * of a matched identifier or path needs them. Every layout converts all its elements,
+         * and encoding each of them made every layout much slower.
+         */
+        public byte[] buffer() {
+            if (buffer == null) {
+                byte[] bytes = element instanceof ElementBytesInterface elementBytes
+                        ? elementBytes.patch_getElementBytes()
+                        : null;
+                // Use an empty buffer if there is none, so the litho id/path filters that do not use a buffer still work.
+                buffer = bytes == null ? EMPTY_BYTE_ARRAY : bytes;
+            }
+            return buffer;
+        }
+
+        public String accessibility() {
+            if (accessibility == null) {
+                if (accessibilityText != null && !accessibilityText.isBlank()) {
+                    accessibility = accessibilityId + '|' + accessibilityText;
+                } else if (accessibilityId != null && !accessibilityId.isBlank()) {
+                    accessibility = accessibilityId;
+                } else {
+                    accessibility = "";
+                }
+            }
+            return accessibility;
+        }
+
+        public BufferAsciiStrings asciiStrings() {
+            if (asciiStrings == null) {
+                asciiStrings = new BufferAsciiStrings(buffer());
+            }
+            return asciiStrings;
+        }
+
         @NonNull
         @Override
         public String toString() {
-            StringBuilder builder = new StringBuilder(identifier.length()
-                    + path.length()
-                    + accessibility.length()
-                    + buffer.length);
+            String acc = accessibility();
+            StringBuilder builder = new StringBuilder(identifier.length() + path.length() + acc.length());
 
             builder.append("ID: ");
             builder.append(identifier);
-            if (!accessibility.isEmpty()) {
+            if (!acc.isEmpty()) {
                 // AccessibilityId and AccessibilityText are pieces of BufferStrings.
                 builder.append(" Accessibility: ");
-                builder.append(accessibility);
+                builder.append(acc);
             }
             builder.append(" Path: ");
             builder.append(path);
-            if (SharedYouTubeSettings.DEBUG_PROTOBUFFER.get()) {
+            if (SharedYouTubeSettings.DEBUG_LITHO.get() == LithoLogging.PATH_AND_BUFFER) {
                 builder.append(" BufferStrings: ");
-                builder.append(asciiStrings.getStrings());
+                builder.append(asciiStrings().getStrings());
             }
 
             return builder.toString();
         }
+    }
+
+    /**
+     * Interface added to the native message of an element, passed to the filter as is.
+     */
+    public interface ElementBytesInterface {
+        /**
+         * @return The encoded bytes of the element.
+         */
+        byte[] patch_getElementBytes();
+    }
+
+    /**
+     * Interface added to the decorator that holds the item of a list, such as the feed.
+     */
+    public interface ListItemDecoratorInterface {
+        @Nullable
+        Object patch_getListItem();
+    }
+
+    /**
+     * Interface added to the sections of the lists, such as the feed or the related videos.
+     */
+    public interface ListSectionInterface {
+        /**
+         * Removes the item from the section, which lays itself out again without it.
+         * The rows of the grids are laid out again too, also when the section is no longer a grid.
+         * The sections that put their lists in the order that fills the rows of the grid, such as
+         * the feed of the tablet layout, remove the list that holds only the item, and put the
+         * other lists in order again.
+         *
+         * @return If the section has the item.
+         */
+        boolean patch_removeListItem(Object item);
     }
 
     /**
@@ -84,11 +201,33 @@ public final class LithoFilterPatch {
     private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
 
     /**
-     * Because litho filtering is multithreaded and the buffer is passed in from a different injection point,
-     * the buffer is saved to a ThreadLocal so each calling thread does not interfere with other threads.
-     * Used for 20.21 and lower.
+     * Observable lists that hold the items of the lists, such as the feed.
+     * The lists use the equality of their content, so they are kept by reference instead of in a set.
      */
-    private static final ThreadLocal<byte[]> bufferThreadLocal = new ThreadLocal<>();
+    private static final List<WeakReference<List<?>>> observableLists = new ArrayList<>();
+
+    /**
+     * Sections of the lists, such as the feed or the related videos, that hold the items.
+     */
+    private static final List<WeakReference<ListSectionInterface>> listSections = new ArrayList<>();
+
+    /**
+     * Positions of the items removed from the lists, by the observer that keeps the scroll position of the list.
+     * Each entry is the position and the count of the removed items, in the order they were removed.
+     * Only used on the main thread.
+     */
+    private static final Map<Object, List<int[]>> removedListItemPositions = new WeakHashMap<>();
+
+    /**
+     * If the item of a filtered element is being removed from its list. Only used on the main thread.
+     */
+    private static boolean isRemovingListItem;
+
+    /**
+     * Path of the position of an item in its grid in the element of the item, such as a Short of the grid of Shorts
+     * of the search results (shorts_video_cell.eml). The element lays the item out for the column of its position.
+     */
+    private static final int[] GRID_ITEM_POSITION_PATH = {1, 168777401, 5, 519005951, 17, 16};
 
     private static final StringTrieSearch contextSearchTree = new StringTrieSearch();
     private static final StringTrieSearch pathSearchTree = new StringTrieSearch();
@@ -123,21 +262,27 @@ public final class LithoFilterPatch {
             for (CharSequence pattern : group.filters) {
                 pathSearchTree.addPattern(pattern, (textSearched, matchedStartIndex,
                                                     matchedLength, callbackParameter) -> {
-                            if (!group.isEnabled()) return false;
+                            try {
+                                if (!group.isEnabled()) return false;
 
-                            LithoFilterParameters parameters = (LithoFilterParameters) callbackParameter;
-                            final boolean isFiltered = filter.isFiltered(parameters.contextInterface,
-                                    parameters.identifier, parameters.accessibility, parameters.path,
-                                    parameters.buffer, parameters.asciiStrings,
-                                    group, type, matchedStartIndex);
+                                LithoFilterParameters parameters = (LithoFilterParameters) callbackParameter;
+                                final boolean isFiltered = filter.isFiltered(parameters.contextInterface,
+                                        parameters.identifier, parameters.accessibility(), parameters.path,
+                                        parameters.buffer(), parameters.asciiStrings(),
+                                        group, type, matchedStartIndex);
 
-                            if (isFiltered && BaseSettings.DEBUG.get()) {
-                                Logger.printDebug(() -> type == Filter.FilterContentType.IDENTIFIER
-                                        ? filterSimpleName + " filtered identifier: " + parameters.identifier
-                                        : filterSimpleName + " filtered path: " + parameters.path);
+                                if (isFiltered) {
+                                    Logger.printDebug(() -> type == Filter.FilterContentType.IDENTIFIER
+                                            ? filterSimpleName + " filtered identifier: " + parameters.identifier
+                                            : filterSimpleName + " filtered path: " + parameters.path);
+                                }
+
+                                return isFiltered;
+                            } catch (Exception ex) {
+                                // Returning false continues the search with the other filters.
+                                Logger.printException(() -> filterSimpleName + " isFiltered failure", ex);
+                                return false;
                             }
-
-                            return isFiltered;
                         }
                 );
             }
@@ -145,61 +290,39 @@ public final class LithoFilterPatch {
     }
 
     /**
-     * Injection point.  Called off the main thread.
-     * Targets 20.21 and lower.
-     */
-    public static void setProtoBuffer(@Nullable ByteBuffer buffer) {
-        if (buffer == null || !buffer.hasArray()) {
-            // It appears the buffer can be cleared out just before the call to #filter()
-            // Ignore this null value and retain the last buffer that was set.
-            Logger.printDebug(() -> "Ignoring null or empty buffer: " + buffer);
-        } else {
-            // Set the buffer to a thread local.  The buffer will remain in memory, even after the call to #filter completes.
-            // This is intentional, as it appears the buffer can be set once and then filtered multiple times.
-            // The buffer will be cleared from memory after a new buffer is set by the same thread,
-            // or when the calling thread eventually dies.
-            bufferThreadLocal.set(buffer.array());
-        }
-    }
-
-    /**
      * Injection point.
+     *
+     * @param element The native message of the element, whose bytes are encoded only if a filter needs them.
      */
-    public static boolean isFiltered(ContextInterface contextInterface, @Nullable byte[] bytes,
+    public static boolean isFiltered(ContextInterface contextInterface, @Nullable Object element,
                                      @Nullable String accessibilityId, @Nullable String accessibilityText) {
         try {
             String identifier = contextInterface.patch_getIdentifier();
             StringBuilder pathBuilder = contextInterface.patch_getPathBuilder();
-            //noinspection SizeReplaceableByIsEmpty
-            if (identifier == null || identifier.isEmpty() || pathBuilder.length() == 0) {
+            if (Utils.isEmpty(identifier) || Utils.isEmpty(pathBuilder)) {
                 return false;
             }
 
-            String accessibility;
-            if (accessibilityText != null && !accessibilityText.isBlank()) {
-                accessibility = accessibilityId + '|' + accessibilityText;
-            } else if (accessibilityId != null && !accessibilityId.isBlank()) {
-                accessibility = accessibilityId;
-            } else {
-                accessibility = "";
-            }
-
-            byte[] buffer = useLegacyLithoFiltering()
-                    ? bufferThreadLocal.get()
-                    : bytes;
-            // Potentially the buffer may have been null or never set up until now.
-            // Use an empty buffer so the litho id/path filters that do not use a buffer still work.
-            if (buffer == null) {
-                buffer = EMPTY_BYTE_ARRAY;
-            }
-
             LithoFilterParameters parameter = new LithoFilterParameters(
-                    contextInterface, identifier, pathBuilder, accessibility,
-                    buffer, new BufferAsciiStrings(buffer));
-            Logger.printDebug(() -> "Searching " + parameter);
+                    contextInterface, identifier, pathBuilder,
+                    accessibilityId, accessibilityText, element);
+            if (SharedYouTubeSettings.DEBUG_LITHO.get() != LithoLogging.DISABLED) {
+                Logger.printDebug(() -> "Searching " + parameter);
+            }
 
-            return identifierSearchTree.matches(identifier, parameter)
-                    || pathSearchTree.matches(pathBuilder, parameter);
+            if (identifierSearchTree.matches(identifier, parameter)
+                    || pathSearchTree.matches(pathBuilder, parameter)) {
+                // The root component of the element, such as 'identifier|CellType|',
+                // means that the whole element is hidden.
+                final int identifierLength = identifier.length();
+                if (pathBuilder.length() > identifierLength + 1
+                        && pathBuilder.charAt(identifierLength) == '|'
+                        && pathBuilder.indexOf("|", identifierLength + 1) == pathBuilder.length() - 1
+                        && Utils.startsWith(pathBuilder, identifier)) {
+                    removeFilteredElementListItem(contextInterface);
+                }
+                return true;
+            }
         } catch (Exception ex) {
             Logger.printException(() -> "isFiltered failure", ex);
         }
@@ -207,8 +330,280 @@ public final class LithoFilterPatch {
         return false;
     }
 
-    private static boolean useLegacyLithoFiltering() {
-        return false; // Method is modified during patching.
+    /**
+     * Injection point.
+     * Called when an observable list, which can hold the items of a list such as the feed, is created.
+     */
+    public static void addObservableList(List<?> list) {
+        synchronized (observableLists) {
+            // Remove the lists that no longer exist.
+            observableLists.removeIf(reference -> reference.get() == null);
+            observableLists.add(new WeakReference<>(list));
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called when a section of a list, such as the feed or the related videos, is created.
+     */
+    public static void addListSection(ListSectionInterface section) {
+        synchronized (listSections) {
+            // Remove the sections that no longer exist.
+            listSections.removeIf(reference -> reference.get() == null);
+            listSections.add(new WeakReference<>(section));
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called when a section of a list is released, such as when the list is created again.
+     * <p>
+     * A released section can share the list of its items with the section that replaces it.
+     * Removing an item through the released section would not lay out the rows of the new one
+     * again, and the rows that are views of the list would throw on the next access.
+     */
+    public static void removeListSection(ListSectionInterface section) {
+        synchronized (listSections) {
+            listSections.removeIf(reference -> reference.get() == section);
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called when the whole element is hidden.
+     * <p>
+     * Hiding an element replaces it with an empty component, but the item of the element stays
+     * in its list. The grids of the tablet layout, such as the feed or the related videos,
+     * then show an empty cell in its place. To prevent this, the item is removed from the list.
+     */
+    public static void removeFilteredElementListItem(@Nullable ContextInterface contextInterface) {
+        try {
+            if (contextInterface == null) {
+                return;
+            }
+
+            List<?> decorators = contextInterface.patch_getCommandEventDataDecorators();
+            if (decorators == null) {
+                return;
+            }
+
+            for (Object decorator : decorators) {
+                if (decorator instanceof ListItemDecoratorInterface listItemDecorator) {
+                    Object item = listItemDecorator.patch_getListItem();
+                    if (item != null) {
+                        removeListItem(item);
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "removeFilteredElementListItem failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called when the item of an element in a list is created, with the bytes of the element after the element hooks.
+     * <p>
+     * The element hooks hide some elements by removing all their bytes, such as the YouTube Premium promotions.
+     * The item of the element stays in its list, and the grids of the tablet layout, such as the feed, show an empty
+     * cell in its place. The Litho filter does not see these elements, so the item is removed here.
+     */
+    public static void removeHiddenElementListItem(Object item, @Nullable byte[] element) {
+        try {
+            if (element != null && element.length == 0) {
+                removeListItem(item);
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "removeHiddenElementListItem failure", ex);
+        }
+    }
+
+    /**
+     * Removes the item from its list, on the main thread after the code that is running now,
+     * such as the code that adds the item to its list.
+     */
+    private static void removeListItem(Object item) {
+        // The lists can only be changed on the main thread.
+        Utils.runOnMainThread(() -> {
+            // The sections group their items into the rows of some grids, such as
+            // the related videos, and lay the rows out again. Other grids, such as
+            // the feed, have a list for each item, which some sections put in the
+            // order that fills the rows.
+            List<ListSectionInterface> sections = new ArrayList<>();
+            synchronized (listSections) {
+                Iterator<WeakReference<ListSectionInterface>> iterator = listSections.iterator();
+                while (iterator.hasNext()) {
+                    ListSectionInterface section = iterator.next().get();
+                    if (section == null) {
+                        iterator.remove();
+                        continue;
+                    }
+                    sections.add(section);
+                }
+            }
+
+            // Removing the item notifies the list observers, so it is done outside the lock.
+            isRemovingListItem = true;
+            try {
+                for (ListSectionInterface section : sections) {
+                    if (section.patch_removeListItem(item)) {
+                        Logger.printDebug(() -> "Removed list item of hidden element: " + item);
+                        return;
+                    }
+                }
+            } finally {
+                isRemovingListItem = false;
+            }
+
+            List<?> itemList = null;
+            int itemIndex = -1;
+            synchronized (observableLists) {
+                Iterator<WeakReference<List<?>>> iterator = observableLists.iterator();
+                while (iterator.hasNext()) {
+                    List<?> list = iterator.next().get();
+                    if (list == null) {
+                        iterator.remove();
+                        continue;
+                    }
+
+                    itemIndex = list.indexOf(item);
+                    if (itemIndex >= 0) {
+                        itemList = list;
+                        break;
+                    }
+                }
+            }
+
+            // Removing the item notifies the list observers, so it is done outside the lock.
+            if (itemList != null) {
+                isRemovingListItem = true;
+                try {
+                    itemList.remove(itemIndex);
+                } finally {
+                    isRemovingListItem = false;
+                }
+                Logger.printDebug(() -> "Removed list item of hidden element: " + item);
+            }
+        });
+    }
+
+    /**
+     * Injection point.
+     * Called on the main thread when items are removed from a list, such as the feed or the search results,
+     * with the observer that keeps the first position of the list that changed since the list was loaded.
+     */
+    public static void onListItemsRemoved(Object observer, int position, int count) {
+        try {
+            if (!isRemovingListItem) {
+                return;
+            }
+
+            List<int[]> positions = removedListItemPositions.get(observer);
+            if (positions == null) {
+                positions = new ArrayList<>();
+                removedListItemPositions.put(observer, positions);
+            }
+            positions.add(new int[]{position, count});
+        } catch (Exception ex) {
+            Logger.printException(() -> "onListItemsRemoved failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called on the main thread when all the items of a list are loaded again, such as when the feed is refreshed.
+     */
+    public static void onListReloaded(Object observer) {
+        try {
+            removedListItemPositions.remove(observer);
+        } catch (Exception ex) {
+            Logger.printException(() -> "onListReloaded failure", ex);
+        }
+    }
+
+    /**
+     * Injection point.
+     * Called on the main thread when a list is left, such as when a video is opened from the search results.
+     * <p>
+     * The list restores its scroll position when it is loaded again, but it is loaded again
+     * with the items of the filtered elements, which are removed only when their elements are hidden again.
+     * The position is moved by the items removed before it, so the list shows the same item again.
+     *
+     * @return The position in the list with the removed items.
+     */
+    public static int getScrollPosition(Object observer, int position) {
+        try {
+            List<int[]> positions = removedListItemPositions.get(observer);
+            if (positions == null || position < 0) {
+                return position;
+            }
+
+            // The items removed later have the positions of the list without the items removed earlier.
+            for (int i = positions.size() - 1; i >= 0; i--) {
+                int[] removed = positions.get(i);
+                if (position >= removed[0]) {
+                    position += removed[1];
+                }
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "getScrollPosition failure", ex);
+        }
+
+        return position;
+    }
+
+    /**
+     * Injection point.
+     * Called for each item after an item that is removed from a grid, on the main thread.
+     * <p>
+     * The item moves back by one position, and can move to another column. The position is changed
+     * in the bytes of its element, which the item is laid out with again when the grid lays out its rows again.
+     * Otherwise, the item keeps the spacing of its old column, such as a Short of the left column
+     * with the spacing of the right column.
+     */
+    public static void moveGridItemBack(@Nullable byte[] element) {
+        if (element == null) {
+            return;
+        }
+        try {
+            int start = 0;
+            int end = element.length;
+            for (int depth = 0; depth < GRID_ITEM_POSITION_PATH.length; depth++) {
+                final int field = GRID_ITEM_POSITION_PATH[depth];
+                final boolean isPosition = depth == GRID_ITEM_POSITION_PATH.length - 1;
+                CodedInputStream input = CodedInputStream.newInstance(element, start, end - start);
+                int messageStart = -1;
+                while (!input.isAtEnd()) {
+                    final int tag = input.readTag();
+                    final int wireType = WireFormat.getTagWireType(tag);
+                    if (WireFormat.getTagFieldNumber(tag) != field) {
+                        input.skipField(tag);
+                    } else if (isPosition && wireType == WireFormat.WIRETYPE_VARINT) {
+                        final int positionStart = start + input.getTotalBytesRead();
+                        final long position = input.readRawVarint64();
+                        // Positions start at 0. A position of one byte stays one byte, so it's changed in place.
+                        if (position > 0 && start + input.getTotalBytesRead() == positionStart + 1) {
+                            element[positionStart] = (byte) (position - 1);
+                            Logger.printDebug(() -> "Moved grid item back to position: " + (position - 1));
+                        }
+                        return;
+                    } else if (!isPosition && wireType == WireFormat.WIRETYPE_LENGTH_DELIMITED) {
+                        final int length = input.readRawVarint32();
+                        messageStart = start + input.getTotalBytesRead();
+                        end = messageStart + length;
+                        break;
+                    } else {
+                        input.skipField(tag);
+                    }
+                }
+                if (messageStart < 0) {
+                    return;
+                }
+                start = messageStart;
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "moveGridItemBack failure", ex);
+        }
     }
 
     /**

@@ -7,56 +7,54 @@
 
 package app.morphe.patches.music.layout.miniplayer
 
-import app.morphe.patcher.Fingerprint
-import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
-import app.morphe.patcher.InstructionLocation.MatchAfterWithin
+import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.fieldAccess
-import app.morphe.patcher.methodCall
-import app.morphe.patcher.opcode
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patcher.util.findFreeRegister
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
+import app.morphe.patches.music.misc.playservice.is_9_43_or_greater
 import app.morphe.patches.music.misc.playservice.versionCheckPatch
 import app.morphe.patches.music.misc.settings.PreferenceScreen
 import app.morphe.patches.music.misc.settings.settingsPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
+import app.morphe.patches.music.video.information.musicVideoIdHook
+import app.morphe.patches.music.video.information.musicVideoInformationPatch
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.util.addInstructionsAtControlFlowLabel
-import app.morphe.util.findFreeRegister
-import app.morphe.util.getReference
 import com.android.tools.smali.dexlib2.AccessFlags
-import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.Reference
-import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/music/patches/EnableSwipeToDismissMiniplayerPatch;"
+private const val WATCH_WHILE_LAYOUT_INTERFACE =
+    $$"Lapp/morphe/extension/music/patches/EnableSwipeToDismissMiniplayerPatch$WatchWhileLayoutAccess;"
 private const val CROSSFADE_MANAGER_CLASS = "Lapp/morphe/extension/music/patches/CrossfadePatch;"
 
-@Suppress("unused")
-val enableSwipeToDismissMiniplayerPatch = bytecodePatch(
+val enableSwipeToDismissMiniplayerPatch = patch(
     name = "Enable swipe to dismiss miniplayer",
     description = "Adds an option to enable dismissing the miniplayer by swiping down on it."
 ) {
     dependsOn(
         sharedExtensionPatch,
         settingsPatch,
-        versionCheckPatch
+        versionCheckPatch,
+        musicVideoInformationPatch
     )
 
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
     execute {
-        PreferenceScreen.PLAYER.addPreferences(
+        PreferenceScreen.addMiniplayerPreferences(
             SwitchPreference("morphe_music_enable_swipe_to_dismiss_miniplayer", summary = true)
         )
 
@@ -64,8 +62,7 @@ val enableSwipeToDismissMiniplayerPatch = bytecodePatch(
 
         val interactionLoggingSwipeField = InteractionLoggingEnumFingerprint
             .instructionMatches[1]
-            .instruction
-            .getReference<FieldReference>()!!
+            .fieldReference
 
         val widgetReferences = mutableListOf<Reference>()
         val widgetInstructionMatches = MusicActivityWidgetFingerprint.instructionMatches
@@ -78,7 +75,10 @@ val enableSwipeToDismissMiniplayerPatch = bytecodePatch(
 
         val musicActivityPeerClass = (widgetReferences[0] as FieldReference).definingClass
 
-        watchWhileDismissedFingerprint(musicActivityPeerClass).let {
+        WatchWhileDismissedFingerprint.let {
+            // The change miniplayer color patch can add code to the start of this method.
+            it.clearMatch()
+
             val helperMethod = ImmutableMethod(
                 it.classDef.type,
                 "patch_swipeToDismissMiniplayer",
@@ -127,6 +127,7 @@ val enableSwipeToDismissMiniplayerPatch = bytecodePatch(
                         return-void
                         :dismiss
                         invoke-static { }, $CROSSFADE_MANAGER_CLASS->onQueueDismissed()V
+                        invoke-static { }, $EXTENSION_CLASS->onMiniplayerDismissed()V
                     """
                 )
             }
@@ -134,25 +135,44 @@ val enableSwipeToDismissMiniplayerPatch = bytecodePatch(
 
         // endregion
 
+        // region Keep the miniplayer hidden after dismissing it, until a song is played
+
+        // After a dismiss, the app asks again for the miniplayer in some cases (such as a tab change
+        // or the next app start), and the miniplayer comes back with "Nothing is playing".
+        // The dismissed state is saved by the extension, so it is also kept after the app is closed.
+        WatchWhileLayoutSetPlayerStateFingerprint.method.addInstruction(
+            0,
+            "invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->onPlayerStateChanged(Ljava/lang/Enum;)V"
+        )
+
+        WatchWhileLayoutRequestPlayerStateFingerprint.let {
+            it.method.apply {
+                val freeRegister = findFreeRegister(0)
+
+                addInstructionsWithLabels(
+                    0,
+                    """
+                        invoke-static/range { p0 .. p1 }, $EXTENSION_CLASS->ignorePlayerStateRequest(${WATCH_WHILE_LAYOUT_INTERFACE}Ljava/lang/Enum;)Z
+                        move-result v$freeRegister
+                        if-eqz v$freeRegister, :request
+                        return-void
+                        :request
+                        nop
+                    """
+                )
+            }
+
+            // The extension requests the miniplayer again when a song is played after dismissing.
+            it.classDef.addPatchInterface(WATCH_WHILE_LAYOUT_INTERFACE, "patch_requestPlayerState", it.method)
+        }
+
+        musicVideoIdHook("$EXTENSION_CLASS->newVideoLoaded(Ljava/lang/String;)V")
+
+        // endregion
+
         // region Hide cold start miniplayer text (R.string.mini_player_default_text)
 
-        Fingerprint(
-            accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
-            parameters = listOf("Ljava/lang/Object;"),
-            returnType = "V",
-            filters = listOf(
-                opcode(Opcode.IF_NE),
-                fieldAccess(
-                    opcode = Opcode.IGET_OBJECT,
-                    type = WATCH_WHILE_LAYOUT_CLASS,
-                    location = MatchAfterImmediately()
-                ),
-                methodCall(
-                    opcode = Opcode.INVOKE_VIRTUAL,
-                    smali = MiniPlayerDefaultTextFingerprint.method.toString()
-                )
-            )
-        ).let {
+        ColdStartMiniplayerTextFingerprint.let {
             it.method.apply {
                 val insertIndex = it.instructionMatches.first().index
                 val insertRegister = getInstruction<TwoRegisterInstruction>(insertIndex).registerB
@@ -171,34 +191,7 @@ val enableSwipeToDismissMiniplayerPatch = bytecodePatch(
 
         // region Hide warm start miniplayer text (R.string.mini_player_default_text)
 
-        val (watchWhileLayoutClass, warmStartMiniplayerClass) =
-            with(WatchWhileLayoutFingerprint) {
-                // It might be the same method as [MppWatchWhileLayoutFingerprint], use clearMatch.
-                clearMatch()
-
-                Pair(
-                    method.definingClass,
-                    instructionMatches.last().instruction.getReference<TypeReference>()!!.type
-                )
-            }
-
-        Fingerprint(
-            definingClass = warmStartMiniplayerClass,
-            parameters = listOf("Landroid/view/View;", "I"),
-            filters = listOf(
-                fieldAccess(
-                    opcode = Opcode.IGET_OBJECT,
-                    definingClass = watchWhileLayoutClass
-                ),
-                methodCall(
-                    opcode = Opcode.INVOKE_VIRTUAL,
-                    definingClass = "Lcom/google/android/material/bottomsheet/BottomSheetBehavior;",
-                    parameters = listOf("Z"),
-                    returnType = "V",
-                    location = MatchAfterWithin(5)
-                )
-            )
-        ).let {
+        WarmStartMiniplayerTextFingerprint.let {
             it.method.apply {
                 val insertIndex = it.instructionMatches.first().index
                 val jumpIndex = it.instructionMatches.last().index + 1
@@ -219,17 +212,44 @@ val enableSwipeToDismissMiniplayerPatch = bytecodePatch(
 
         // region Disable player page motion event
 
-        PlayerPageBehaviorFingerprint.method.addInstructionsWithLabels(
-            0,
-            """
-                invoke-static { }, $EXTENSION_CLASS->enableSwipeToDismissMiniplayer()Z
-                move-result v0
-                if-eqz v0, :ignore
-                return-void
-                :ignore
-                nop
-            """
-        )
+        if (is_9_43_or_greater) {
+            // The motion field is now set directly from several places,
+            // but it is only read by the touch methods. Clear it before they run.
+            val motionField = PlayerPageBehaviorInterceptTouchEventFingerprint
+                .instructionMatches
+                .first()
+                .fieldReference
+
+            listOf(
+                PlayerPageBehaviorInterceptTouchEventFingerprint,
+                PlayerPageBehaviorTouchEventFingerprint
+            ).forEach {
+                it.method.addInstructionsWithLabels(
+                    0,
+                    """
+                        invoke-static { }, $EXTENSION_CLASS->enableSwipeToDismissMiniplayer()Z
+                        move-result v0
+                        if-eqz v0, :ignore
+                        const/4 v0, 0x0
+                        iput-boolean v0, p0, $motionField
+                        :ignore
+                        nop
+                    """
+                )
+            }
+        } else {
+            PlayerPageBehaviorFingerprint.method.addInstructionsWithLabels(
+                0,
+                """
+                    invoke-static { }, $EXTENSION_CLASS->enableSwipeToDismissMiniplayer()Z
+                    move-result v0
+                    if-eqz v0, :ignore
+                    return-void
+                    :ignore
+                    nop
+                """
+            )
+        }
 
         // endregion
 

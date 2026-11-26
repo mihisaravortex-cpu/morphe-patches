@@ -10,7 +10,6 @@ package app.morphe.patches.reddit.layout.mediaviewer
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.InstructionLocation.MatchAfterWithin
-import app.morphe.patcher.checkCast
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.literal
 import app.morphe.patcher.methodCall
@@ -52,11 +51,11 @@ internal object FullBleedChromeStateToStringFingerprint : Fingerprint(
 /**
  * Creates the media viewer chrome state of a post, when it is shown in the media viewer.
  */
-internal fun createFullBleedChromeStateFingerprint(chromeStateType: String) = Fingerprint(
-    returnType = chromeStateType,
+internal object CreateFullBleedChromeStateFingerprint : Fingerprint(
+    returnType = { FullBleedChromeStateToStringFingerprint.originalClassDef.type },
     parameters = listOf("Lcom/reddit/domain/model/Link;", "L", "Ljava/lang/String;", "Ljava/lang/String;"),
     filters = listOf(
-        newInstance(chromeStateType)
+        newInstance(type = { FullBleedChromeStateToStringFingerprint.originalClassDef.type })
     )
 )
 
@@ -192,26 +191,28 @@ internal object VideoPlayerBackgroundFingerprint : Fingerprint(
 )
 
 /**
- * Any read of LocalContext from a composable.
+ * Static initializer of the Android composition locals, which creates LocalContext.
  */
 internal object LocalContextFingerprint : Fingerprint(
+    definingClass = "Landroidx/compose/ui/platform/AndroidCompositionLocals_androidKt;",
+    name = "<clinit>",
     filters = listOf(
         fieldAccess(
             opcode = Opcode.SGET_OBJECT,
-            definingClass = "Landroidx/compose/ui/platform/AndroidCompositionLocals_androidKt;"
+            definingClass = $$"Landroidx/compose/ui/platform/AndroidCompositionLocals_androidKt$LocalContext$1;",
+            name = "INSTANCE"
         ),
-        methodCall(
-            returnType = "Ljava/lang/Object;",
-            parameters = listOf("L"),
-            location = MatchAfterImmediately()
-        ),
-        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
-        checkCast("Landroid/content/Context;", location = MatchAfterImmediately())
+        // LocalContext field.
+        fieldAccess(
+            opcode = Opcode.SPUT_OBJECT,
+            definingClass = "this",
+            location = MatchAfterWithin(2)
+        )
     )
 )
 
 /**
- * Media viewer chrome before 2026.38.0. Right after building the fade gradient from an array of
+ * Media viewer chrome before 2026.37.0. Right after building the fade gradient from an array of
  * (position, color) pairs, Reddit can swap in a darker static gradient.
  */
 internal object MediaViewerChromeLegacyFingerprint : Fingerprint(
@@ -232,7 +233,76 @@ internal object MediaViewerChromeLegacyFingerprint : Fingerprint(
 
 // Color.copy(alpha) calls that construct the fade's color stops.
 internal val mediaViewerFadeAlphaFilter = methodCall(
+    parameters = listOf("F", "J"),
+    returnType = "J",
+    opcodes = listOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE)
+)
+
+// Color.copy(alpha) calls before 2026.45.0, with the alpha as the last parameter.
+internal val mediaViewerFadeAlphaLegacyFilter = methodCall(
     parameters = listOf("J", "F"),
     returnType = "J",
     opcodes = listOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE)
+)
+
+/**
+ * Lazy value of whether the media viewer chains posts vertically (swipe up for the next post),
+ * instead of horizontally.
+ */
+internal object VerticalChainingFingerprint : Fingerprint(
+    name = "invoke",
+    returnType = "Ljava/lang/Object;",
+    parameters = listOf(),
+    filters = listOf(
+        fieldAccess(
+            definingClass = "Lcom/reddit/fullbleedplayer/FbpRedesignM3Variant;",
+            name = "VERTICAL_CHAINING"
+        ),
+        methodCall(
+            smali = "Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;",
+            location = MatchAfterWithin(5)
+        )
+    )
+)
+
+/**
+ * Media viewer pager state constructor, which calls the vertical chaining flag getter.
+ * Used before Reddit 2026.37.0, where the flag is a plain getter.
+ */
+internal object VerticalChainingLegacyFingerprint : Fingerprint(
+    name = "<init>",
+    returnType = "V",
+    filters = listOf(
+        methodCall(returnType = "Z", parameters = listOf()),
+        methodCall(
+            smali = "Lcom/reddit/domain/model/media/MediaContext;->isImage()Z",
+            location = MatchAfterWithin(10)
+        ),
+        newInstance("Lcom/reddit/fullbleedplayer/data/viewstateproducers/PagerStateProducer\$1;")
+    )
+)
+
+private const val MEDIA_CONTEXT_CLASS = "Lcom/reddit/domain/model/media/MediaContext;"
+
+private fun recommendedPostsRequestFilters(endpointClass: String) = listOf(
+    methodCall(definingClass = MEDIA_CONTEXT_CLASS, name = "getSeedSubredditIds"),
+    methodCall(definingClass = MEDIA_CONTEXT_CLASS, name = "getListingType"),
+    fieldAccess(definingClass = endpointClass, name = "COMMUNITY"),
+    methodCall(definingClass = "Lcom/reddit/domain/model/listing/Listing;", name = "<init>")
+)
+
+/**
+ * RemoteGqlLinkDataSource.getRecommendedMedia, which loads the posts of the media viewer.
+ */
+internal object RecommendedMediaRequestFingerprint : Fingerprint(
+    returnType = "Ljava/lang/Object;",
+    filters = recommendedPostsRequestFilters("Lcom/reddit/type/MediaFeedEndpoint;")
+)
+
+/**
+ * RemoteGqlLinkDataSource.getRecommendedVideos, which loads the posts of the video viewer.
+ */
+internal object RecommendedVideosRequestFingerprint : Fingerprint(
+    returnType = "Ljava/lang/Object;",
+    filters = recommendedPostsRequestFilters("Lcom/reddit/type/VideoFeedEndpoint;")
 )

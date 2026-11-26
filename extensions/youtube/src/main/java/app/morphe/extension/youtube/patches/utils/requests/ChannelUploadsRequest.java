@@ -37,6 +37,7 @@ import app.morphe.extension.youtube.patches.utils.requests.ChannelSearchRequest.
  * The uploads playlist always lists every video, Short and live stream in the order they were
  * published, so it makes the results of a sort complete and sorts them by date exactly.
  */
+@SuppressWarnings("unused")
 public final class ChannelUploadsRequest {
 
     public static final class Uploads {
@@ -392,7 +393,7 @@ public final class ChannelUploadsRequest {
     /**
      * Lower case words without accents, so a search matches titles written with or without them.
      */
-    private static List<String> normalizedWords(String text) {
+    static List<String> normalizedWords(String text) {
         List<String> words = new ArrayList<>();
         for (String word : normalize(text).split("\\s+")) {
             if (!word.isEmpty()) {
@@ -413,7 +414,10 @@ public final class ChannelUploadsRequest {
         return matches(text, normalizedWords(query));
     }
 
-    private static boolean matches(String text, List<String> queryWords) {
+    /**
+     * @param queryWords Words of the search from {@link #normalizedWords}.
+     */
+    static boolean matches(String text, List<String> queryWords) {
         if (queryWords.isEmpty()) {
             return false;
         }

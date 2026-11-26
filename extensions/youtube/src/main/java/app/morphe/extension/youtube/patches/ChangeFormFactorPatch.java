@@ -15,7 +15,8 @@ import androidx.annotation.Nullable;
 import java.util.List;
 import java.util.Optional;
 
-import app.morphe.extension.shared.settings.Setting;
+import app.morphe.extension.shared.ui.Dim;
+import app.morphe.extension.youtube.patches.car.CarDisplay;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.NavigationBar;
 import app.morphe.extension.youtube.shared.PlayerType;
@@ -61,20 +62,14 @@ public class ChangeFormFactorPatch {
     @Nullable
     private static final Integer FORM_FACTOR_TYPE = FORM_FACTOR.formFactorType;
     private static final boolean IS_BROKEN_FORM_FACTOR = FORM_FACTOR.isBroken;
-    private static final boolean TABLET_LAYOUT_IN_PLAYER = VersionCheckPatch.IS_20_31_OR_GREATER
-            && FORM_FACTOR != FormFactor.LARGE && Settings.TABLET_LAYOUT_IN_PLAYER.get();
 
-    public static final class TabletLayoutInPlayerAvailability implements Setting.Availability {
-        @Override
-        public boolean isAvailable() {
-            return Settings.CHANGE_FORM_FACTOR.get() != FormFactor.LARGE;
-        }
+    private static final int COMPACT_CONTAINER_MAX_WIDTH_DP = 599;
 
-        @Override
-        public List<Setting<?>> getParentSettings() {
-            return List.of(Settings.CHANGE_FORM_FACTOR);
-        }
-    }
+    /**
+     * Browse pages that work with the automotive form factor on a car display.
+     * Channel pages and other browse pages fail with it, so those use the tablet form factor.
+     */
+    private static final String[] CAR_DISPLAY_AUTOMOTIVE_BROWSE_IDS = {"FEwhat_to_watch", "FEsubscriptions"};
 
     /**
      * Injection point.
@@ -83,6 +78,11 @@ public class ChangeFormFactorPatch {
      * Called from all endpoints.
      */
     public static int getUniversalFormFactor(int original) {
+        if (CarDisplay.isOnCarDisplay()) {
+            // Broken pages are handled per endpoint.
+            return FormFactor.AUTOMOTIVE.formFactorType;
+        }
+
         if (FORM_FACTOR_TYPE == null) {
             return original;
         }
@@ -126,12 +126,60 @@ public class ChangeFormFactorPatch {
      * the Shorts comment panel will not open.
      */
     public static int replaceBrokenFormFactor(int original) {
-        if (IS_BROKEN_FORM_FACTOR || TABLET_LAYOUT_IN_PLAYER) {
+        if (IS_BROKEN_FORM_FACTOR || CarDisplay.isOnCarDisplay()) {
             // The form factor most similar to AUTOMOTIVE is LARGE, so it is replaced with LARGE.
             return Optional.ofNullable(FormFactor.LARGE.formFactorType).orElse(original);
         } else {
             return original;
         }
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Called after {@link #getUniversalFormFactor(int)}.
+     * Called from the '/browse' endpoint.
+     * <p>
+     * On a car display, only the browse pages that work keep the automotive form factor.
+     */
+    public static int replaceBrowseFormFactor(int original, @Nullable String browseId) {
+        if (CarDisplay.isOnCarDisplay() && !isCarDisplayAutomotiveBrowseId(browseId)) {
+            return FormFactor.LARGE.formFactorType;
+        }
+
+        return original;
+    }
+
+    /**
+     * @return If the browse page uses the automotive form factor on a car display.
+     *         A request without a browse ID keeps the automotive form factor.
+     */
+    private static boolean isCarDisplayAutomotiveBrowseId(@Nullable String browseId) {
+        if (browseId == null) {
+            return true;
+        }
+
+        for (String automotiveBrowseId : CAR_DISPLAY_AUTOMOTIVE_BROWSE_IDS) {
+            if (automotiveBrowseId.equals(browseId)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Injection point.
+     * <p>
+     * Responsive containers are classified by their width, and a tablet is wider than the
+     * compact class of a phone (under 600dp), so the home feed of the phone layout turns into a list.
+     */
+    public static int getResponsiveContainerWidth(int widthPx) {
+        if (FORM_FACTOR != FormFactor.SMALL || CarDisplay.isOnCarDisplay()) {
+            return widthPx;
+        }
+
+        return Math.min(widthPx, Dim.dp(COMPACT_CONTAINER_MAX_WIDTH_DP));
     }
 
     /**

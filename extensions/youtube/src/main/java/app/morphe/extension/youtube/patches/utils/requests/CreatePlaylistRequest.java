@@ -9,6 +9,8 @@ package app.morphe.extension.youtube.patches.utils.requests;
 
 import static app.morphe.extension.shared.StringRef.str;
 
+import android.util.Pair;
+
 import androidx.annotation.Nullable;
 
 import org.json.JSONException;
@@ -17,26 +19,15 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.requests.Requester;
-import app.morphe.extension.shared.settings.BaseSettings;
-import kotlin.Pair;
 
 public class CreatePlaylistRequest {
-    private static final int MAX_MILLISECONDS_TO_WAIT_FOR_FETCH = 20 * 1000;
-
-    public static final Map<String, CreatePlaylistRequest> cache = Collections.synchronizedMap(
-            Utils.createSizeRestrictedMap(50));
-
     private final Future<Pair<String, String>> future;
 
     private CreatePlaylistRequest(String videoId, Map<String, String> requestHeader) {
@@ -45,40 +36,11 @@ public class CreatePlaylistRequest {
 
     @Nullable
     public Pair<String, String> getPlaylistId() {
-        try {
-            if (BaseSettings.DEBUG.get() && !future.isDone() && Utils.isCurrentlyOnMainThread()) {
-                Logger.printException(() -> "Debug: Blocking main thread");
-            }
-            return future.get(MAX_MILLISECONDS_TO_WAIT_FOR_FETCH, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException ex) {
-            Logger.printInfo(() -> "getPlaylistId timed out", ex);
-        } catch (InterruptedException ex) {
-            Logger.printException(() -> "getPlaylistId interrupted", ex);
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException ex) {
-            Logger.printException(() -> "getPlaylistId failure", ex);
-        }
-        return null;
+        return PlaylistRoutes.getResult(future, "getPlaylistId");
     }
 
-    public static void clear() {
-        cache.clear();
-    }
-
-    public static void fetchRequestIfNeeded(String videoId, Map<String, String> requestHeader) {
-        cache.computeIfAbsent(
-                Objects.requireNonNull(videoId),
-                k -> new CreatePlaylistRequest(k, requestHeader)
-        );
-    }
-
-    @Nullable
-    public static CreatePlaylistRequest getRequestForVideoId(String videoId) {
-        return cache.get(videoId);
-    }
-
-    private static void handleConnectionError(String toastMessage, @Nullable Exception ex) {
-        Logger.printInfo(() -> toastMessage, ex);
+    public static CreatePlaylistRequest fetchRequestIfNeeded(String videoId, Map<String, String> requestHeader) {
+        return new CreatePlaylistRequest(Objects.requireNonNull(videoId), requestHeader);
     }
 
     @Nullable
@@ -101,11 +63,11 @@ public class CreatePlaylistRequest {
             if (responseCode == Requester.HTTP_STATUS_CODE_SUCCESS) {
                 return Requester.parseJSONObject(connection);
             }
-            handleConnectionError("Create playlist failed with code: " + responseCode, null);
+            PlaylistRoutes.handleConnectionError("Create playlist failed with code: " + responseCode, null);
         } catch (SocketTimeoutException ex) {
-            handleConnectionError("Connection timeout", ex);
+            PlaylistRoutes.handleConnectionError("Connection timeout", ex);
         } catch (IOException ex) {
-            handleConnectionError("Network error", ex);
+            PlaylistRoutes.handleConnectionError("Network error", ex);
         } catch (Exception ex) {
             Logger.printException(() -> "sendCreatePlaylistRequest failed", ex);
         } finally {
@@ -135,11 +97,11 @@ public class CreatePlaylistRequest {
             if (responseCode == Requester.HTTP_STATUS_CODE_SUCCESS) {
                 return Requester.parseJSONObject(connection);
             }
-            handleConnectionError("Get set video id failed with code: " + responseCode, null);
+            PlaylistRoutes.handleConnectionError("Get set video id failed with code: " + responseCode, null);
         } catch (SocketTimeoutException ex) {
-            handleConnectionError("Connection timeout", ex);
+            PlaylistRoutes.handleConnectionError("Connection timeout", ex);
         } catch (IOException ex) {
-            handleConnectionError("Network error", ex);
+            PlaylistRoutes.handleConnectionError("Network error", ex);
         } catch (Exception ex) {
             Logger.printException(() -> "sendSetVideoIdRequest failed", ex);
         } finally {

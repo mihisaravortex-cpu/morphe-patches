@@ -82,16 +82,18 @@ internal object FeedPostTitleSectionToStringFingerprint : Fingerprint(
 )
 
 /**
- * Reddit's mapper that creates a flair element with a single flair.
+ * Reddit's mapper that creates a flair element with a single flair from a GraphQL fragment.
+ * The feed post mapper creates it the same way, but has no community placeholder strings.
  */
-internal fun postFlairsElementMapperFingerprint(
-    presentationModelType: String,
-    flairsElementType: String
-) = Fingerprint(
-    returnType = flairsElementType,
+internal object PostFlairsElementMapperFingerprint : Fingerprint(
+    returnType = { PostFlairsElementToStringFingerprint.originalClassDef.type },
+    strings = listOf(
+        "subredditName",
+        "subredditId"
+    ),
     filters = listOf(
         methodCall(
-            definingClass = presentationModelType,
+            definingClass = { PostFlairFeedPresentationModelToStringFingerprint.originalClassDef.type },
             name = "<init>"
         ),
         // Creates a persistent list from an array.
@@ -99,9 +101,9 @@ internal fun postFlairsElementMapperFingerprint(
             opcode = Opcode.INVOKE_STATIC,
             parameters = listOf("[Ljava/lang/Object;")
         ),
-        newInstance(flairsElementType),
+        newInstance(type = { PostFlairsElementToStringFingerprint.originalClassDef.type }),
         methodCall(
-            definingClass = flairsElementType,
+            definingClass = { PostFlairsElementToStringFingerprint.originalClassDef.type },
             name = "<init>"
         )
     )
@@ -163,21 +165,18 @@ internal object PostPreviewFeedElementConstructorFingerprint : Fingerprint(
 /**
  * Kotlin data class copy method with a default value bit mask.
  */
-internal fun postPreviewFeedElementCopyFingerprint(
-    postPreviewFeedElementType: String,
-    flairsElementType: String
-) = Fingerprint(
-    definingClass = postPreviewFeedElementType,
+internal object PostPreviewFeedElementCopyFingerprint : Fingerprint(
+    definingClass = { PostPreviewFeedElementToStringFingerprint.originalClassDef.type },
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
-    returnType = postPreviewFeedElementType,
+    returnType = { PostPreviewFeedElementToStringFingerprint.originalClassDef.type },
     filters = listOf(
         // Flairs element default value bit.
         opcode(Opcode.AND_INT_LIT16),
         opcode(Opcode.IF_EQZ, MatchAfterImmediately()),
         fieldAccess(
             opcode = Opcode.IGET_OBJECT,
-            definingClass = postPreviewFeedElementType,
-            type = flairsElementType,
+            definingClass = { PostPreviewFeedElementToStringFingerprint.originalClassDef.type },
+            type = { PostFlairsElementToStringFingerprint.originalClassDef.type },
             location = MatchAfterImmediately()
         )
     )
@@ -225,11 +224,57 @@ internal object FeedPostSectionConstructorFingerprint : Fingerprint(
     )
 )
 
-internal fun feedPostSectionMapperFingerprint(feedPostSectionType: String) = Fingerprint(
+internal object ClassicPostElementToStringFingerprint : Fingerprint(
+    name = "toString",
+    parameters = listOf(),
+    returnType = "Ljava/lang/String;",
+    strings = listOf(
+        "ClassicPostElement(linkId=",
+        ", uniqueId="
+    )
+)
+
+internal object ClassicPostElementConstructorFingerprint : Fingerprint(
+    classFingerprint = ClassicPostElementToStringFingerprint,
+    name = "<init>",
     filters = listOf(
-        newInstance(feedPostSectionType),
+        // Flairs element.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = { PostFlairsElementToStringFingerprint.originalClassDef.type }
+        )
+    )
+)
+
+internal object ClassicPostSectionToStringFingerprint : Fingerprint(
+    name = "toString",
+    parameters = listOf(),
+    returnType = "Ljava/lang/String;",
+    strings = listOf(
+        "ClassicPostSection(linkId=",
+        ", data="
+    )
+)
+
+internal object ClassicPostSectionConstructorFingerprint : Fingerprint(
+    classFingerprint = ClassicPostSectionToStringFingerprint,
+    name = "<init>",
+    filters = listOf(
+        // Classic post element.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = { ClassicPostElementToStringFingerprint.originalClassDef.type }
+        )
+    )
+)
+
+internal object FeedPostSectionMapperFingerprint : Fingerprint(
+    filters = listOf(
+        newInstance(type = { FeedPostSectionToStringFingerprint.classDef }),
         methodCall(
-            definingClass = feedPostSectionType,
+            definingClass = { FeedPostSectionToStringFingerprint.classDef },
             name = "<init>"
         ),
         opcode(Opcode.RETURN_OBJECT, MatchAfterImmediately())
@@ -238,16 +283,36 @@ internal fun feedPostSectionMapperFingerprint(feedPostSectionType: String) = Fin
 
 /**
  * Selects the feed posts that Reddit loads in full after a feed page is shown.
- * Post previews are not selected if a feature flag removes this secondary fetch.
+ * Post previews are never selected. The last check is for the post preview class,
+ * or since 2026.46.0 for an obfuscated interface of all post preview classes.
  */
-internal fun postsToLoadFingerprint(postPreviewFeedElementType: String) = Fingerprint(
+internal object PostsToLoadFingerprint : Fingerprint(
+    returnType = "Ljava/util/ArrayList;",
+    parameters = listOf("Ljava/util/List;"),
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.SGET_OBJECT,
+            smali = "Lcom/reddit/common/ThingType;->POST:Lcom/reddit/common/ThingType;"
+        ),
+        // Branch of the check before the post preview check.
+        opcode(Opcode.IF_NEZ),
+        opcode(Opcode.INSTANCE_OF, MatchAfterImmediately()),
+        opcode(Opcode.IF_NEZ, MatchAfterImmediately())
+    )
+)
+
+/**
+ * Selects the feed posts to load before 2026.45.0, where post previews are not selected
+ * if a feature flag removes this secondary fetch.
+ */
+internal object PostsToLoadLegacyFingerprint : Fingerprint(
     returnType = "Ljava/util/ArrayList;",
     parameters = listOf(
         "Ljava/util/List;",
         "Lcom/reddit/feeds/data/FeedType;"
     ),
     filters = listOf(
-        instanceOf(postPreviewFeedElementType),
+        instanceOf(type = { PostPreviewFeedElementToStringFingerprint.classDef }),
         opcode(Opcode.IF_EQZ, MatchAfterImmediately()),
         // Secondary fetch removed flag of one group of feed types.
         methodCall(smali = "Ljava/lang/Boolean;->booleanValue()Z"),
@@ -257,5 +322,77 @@ internal fun postsToLoadFingerprint(postPreviewFeedElementType: String) = Finger
         methodCall(smali = "Ljava/lang/Boolean;->booleanValue()Z"),
         opcode(Opcode.MOVE_RESULT, MatchAfterImmediately()),
         opcode(Opcode.IF_NEZ, MatchAfterImmediately())
+    )
+)
+
+internal object PostFlairFeedPresentationModelConstructorFingerprint : Fingerprint(
+    classFingerprint = PostFlairFeedPresentationModelToStringFingerprint,
+    name = "<init>",
+    filters = listOf(
+        // Text.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = "Ljava/lang/String;"
+        ),
+        // Rich text.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = "Ljava/lang/String;",
+            location = MatchAfterImmediately()
+        ),
+        // Id.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = "Ljava/lang/String;",
+            location = MatchAfterImmediately()
+        ),
+        // Community name.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = "Ljava/lang/String;",
+            location = MatchAfterImmediately()
+        )
+    )
+)
+
+internal object PostFlairsElementConstructorFingerprint : Fingerprint(
+    classFingerprint = PostFlairsElementToStringFingerprint,
+    name = "<init>",
+    filters = listOf(
+        // Link id.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = "Ljava/lang/String;"
+        ),
+        // Unique id.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = "Ljava/lang/String;",
+            location = MatchAfterImmediately()
+        ),
+        // Promoted.
+        fieldAccess(
+            opcode = Opcode.IPUT_BOOLEAN,
+            definingClass = "this",
+            location = MatchAfterImmediately()
+        ),
+        // Identifier.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            location = MatchAfterImmediately()
+        ),
+        // Flairs.
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            location = MatchAfterImmediately()
+        )
     )
 )

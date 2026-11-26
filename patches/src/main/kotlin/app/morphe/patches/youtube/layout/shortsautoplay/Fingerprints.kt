@@ -34,11 +34,15 @@ internal object ReelEnumConstructorFingerprint : Fingerprint(
 private object ReelPlaybackRepeatParentFingerprint : Fingerprint(
     returnType = "V",
     filters = listOf(
-        methodCall($$"Lj$/time/Instant;->toEpochMilli()J"),
+        methodCall("Lj$/time/Instant;->toEpochMilli()J"),
         string("r_tr")
     )
 )
 
+/**
+ * @param reelEnumClass The loop behavior enum. 21.43+ has a sibling method that
+ *                      also uses Optional, but does not look up the loop behavior.
+ */
 internal object ReelPlaybackRepeatFingerprint : Fingerprint(
     classFingerprint = ReelPlaybackRepeatParentFingerprint,
     returnType = "V",
@@ -46,8 +50,9 @@ internal object ReelPlaybackRepeatFingerprint : Fingerprint(
     filters = listOf(
         anyInstruction(
             methodCall(smali = "Lcom/google/common/util/concurrent/ListenableFuture;->isDone()Z"),
-            methodCall(smali = $$"Lj$/util/Optional;->ofNullable(Ljava/lang/Object;)Lj$/util/Optional;") // 21.17+
-        )
+            methodCall(smali = "Lj$/util/Optional;->ofNullable(Ljava/lang/Object;)Lj$/util/Optional;") // 21.17+
+        ),
+        methodCall(returnType = { ReelEnumConstructorFingerprint.originalClassDef.type })
     )
 )
 

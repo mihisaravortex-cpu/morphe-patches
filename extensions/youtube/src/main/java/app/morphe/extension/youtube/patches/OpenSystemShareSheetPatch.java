@@ -7,6 +7,8 @@
 
 package app.morphe.extension.youtube.patches;
 
+import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.util.Base64;
@@ -20,6 +22,7 @@ import java.util.regex.Pattern;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
+import app.morphe.extension.shared.settings.SharedSettings;
 import app.morphe.extension.youtube.patches.utils.ProtoNode;
 import app.morphe.extension.youtube.settings.Settings;
 
@@ -42,7 +45,8 @@ public final class OpenSystemShareSheetPatch {
     private static final int ENTITY_COMMENT_FIELD = 18;
     /**
      * Fields of the entities shared with a plain link.
-     * 10, 12 and 20 are Shorts and entity type metadata that does not change the link.
+     * 10, 12 and 20 are Shorts and entity type metadata, and 13 is set on videos made for kids
+     * (their in-app share sheet only has Copy link and More), none of which changes the link.
      */
     private static final Set<Integer> SHARE_ENTITY_FIELDS = Set.of(
             ENTITY_VIDEO_ID_FIELD,
@@ -50,7 +54,7 @@ public final class OpenSystemShareSheetPatch {
             ENTITY_CHANNEL_ID_FIELD,
             ENTITY_POST_ID_FIELD,
             ENTITY_POST_CHANNEL_ID_FIELD,
-            10, 12, 20
+            10, 12, 13, 20
     );
 
     // Comment entity fields. 3, 4 and 6 are the header, text and avatar of the share sheet.
@@ -101,7 +105,7 @@ public final class OpenSystemShareSheetPatch {
      * @return The link, or null if the entity is not a type known to be shared with a plain link.
      */
     @Nullable
-    private static String getShareEntityUrl(String serializedEntity, String longURLPrefix, String videoURLPrefix) {
+    private static String getShareEntityUrl(String serializedEntity, String videoURLPrefix) {
         final byte[] entityBytes;
         try {
             String base64 = Uri.decode(serializedEntity).replace('-', '+').replace('_', '/');
@@ -117,7 +121,7 @@ public final class OpenSystemShareSheetPatch {
         }
         ProtoNode comment = ProtoNode.field(entity, ENTITY_COMMENT_FIELD);
         if (comment != null) {
-            return entity.size() == 1 ? getCommentUrl(comment, longURLPrefix, videoURLPrefix) : null;
+            return entity.size() == 1 ? getCommentUrl(comment, videoURLPrefix) : null;
         }
         for (ProtoNode field : entity) {
             if (!SHARE_ENTITY_FIELDS.contains(field.getFieldNumber())) {
@@ -132,18 +136,20 @@ public final class OpenSystemShareSheetPatch {
         final String channelId = getShareEntityId(entity, ENTITY_CHANNEL_ID_FIELD);
         final String postId = getShareEntityId(entity, ENTITY_POST_ID_FIELD);
         if (postId != null) {
-            return longURLPrefix + "/post/" + postId;
+            return "https://www.youtube.com" + "/post/" + postId;
         }
         if (channelId != null) {
             return videoId == null && playlistId == null
-                    ? longURLPrefix + "/channel/" + channelId
+                    ? "https://www.youtube.com" + "/channel/" + channelId
                     : null;
         }
         if (videoId != null && playlistId == null) {
             return videoURLPrefix + videoId;
         }
-        if (playlistId != null && videoId == null) {
-            return longURLPrefix + "/playlist?list=" + playlistId;
+        // Mixes (playlist ids starting with RD) have no playlist page, and their link only opens
+        // with a video, which the entity does not have. The in-app share sheet shares them instead.
+        if (playlistId != null && videoId == null && !playlistId.startsWith("RD")) {
+            return "https://www.youtube.com" + "/playlist?list=" + playlistId;
         }
         return null;
     }
@@ -152,7 +158,7 @@ public final class OpenSystemShareSheetPatch {
      * @return The link, or null if the comment is not on a video or a post.
      */
     @Nullable
-    private static String getCommentUrl(ProtoNode comment, String longURLPrefix, String videoURLPrefix) {
+    private static String getCommentUrl(ProtoNode comment, String videoURLPrefix) {
         List<ProtoNode> fields = comment.children;
         ProtoNode commentId = fields == null ? null : ProtoNode.field(fields, COMMENT_ID_FIELD);
         ProtoNode path = fields == null ? null : ProtoNode.field(fields, COMMENT_PAGE_PATH_FIELD);
@@ -170,7 +176,7 @@ public final class OpenSystemShareSheetPatch {
             }
             case "/post" -> {
                 String postId = getShareEntityId(ProtoNode.message(fields, COMMENT_POST_PATH), COMMENT_ITEM_ID_FIELD);
-                return postId == null ? null : longURLPrefix + "/post/" + postId + "?lc=" + commentId.getText();
+                return postId == null ? null : "https://www.youtube.com" + "/post/" + postId + "?lc=" + commentId.getText();
             }
             default -> {
                 return null;
@@ -194,7 +200,7 @@ public final class OpenSystemShareSheetPatch {
      * @return If the in-app share sheet must not be opened.
      */
     public static boolean openSystemShareSheet(byte[] shareEndpoint) {
-        if (!Settings.OPEN_SYSTEM_SHARE_SHEET.get()) {
+        if (!SharedSettings.OPEN_SYSTEM_SHARE_SHEET.get()) {
             return false;
         }
 
@@ -213,7 +219,7 @@ public final class OpenSystemShareSheetPatch {
                 ? longURLPrefix + "/watch?v="
                 : "https://youtu.be/";
 
-        final String intentUrl = getShareEntityUrl(serializedEntity.getText(), longURLPrefix, videoURLPrefix);
+        final String intentUrl = getShareEntityUrl(serializedEntity.getText(), videoURLPrefix);
         if (intentUrl == null) {
             Logger.printDebug(() -> "No link for share endpoint, opening the in-app share sheet: "
                     + Base64.encodeToString(shareEndpoint, Base64.NO_WRAP));
@@ -225,10 +231,20 @@ public final class OpenSystemShareSheetPatch {
         shareIntent.setType("text/plain");
         shareIntent.putExtra(Intent.EXTRA_TEXT, intentUrl);
         final Intent chooserIntent = Intent.createChooser(shareIntent, "");
-        chooserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
+        // Opening the share sheet is not the user leaving the app, so a playing video does not
+        // enter picture-in-picture. It is opened in the task of the app when the activity is known,
+        // as some devices put YouTube in the background and enter picture-in-picture
+        // when it opens in a new task.
+        chooserIntent.addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION);
+        Activity activity = Utils.getActivity();
+        Context context = activity;
+        if (activity == null || activity.isFinishing()) {
+            context = Utils.getContext();
+            chooserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
 
         try {
-            Utils.getContext().startActivity(chooserIntent);
+            context.startActivity(chooserIntent);
         } catch (Exception ex) {
             Logger.printException(() -> "Can not open System Share panel: " + intentUrl, ex);
         }

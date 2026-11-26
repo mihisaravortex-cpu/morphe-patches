@@ -8,6 +8,7 @@
 package app.morphe.extension.youtube.patches;
 
 import android.app.Activity;
+import android.graphics.Rect;
 import android.os.Build;
 import android.util.DisplayMetrics;
 import android.view.View;
@@ -25,11 +26,11 @@ import java.util.List;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
-import app.morphe.extension.youtube.patches.VideoFormat.FormatInterface;
+import app.morphe.extension.shared.settings.Setting;
+import app.morphe.extension.shared.patches.VideoFormat.FormatInterface;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.PlayerType;
 import app.morphe.extension.youtube.shared.ShortsPlayerState;
-import kotlin.Unit;
 
 /**
  * Maps the playing video onto the full display with a compositor transform.
@@ -40,7 +41,8 @@ import kotlin.Unit;
  * current window instead.
  * <p>
  * Stretch fills the screen for any source aspect ratio by distorting.
- * Zoom covers the screen uniformly (crops). Default leaves YouTube letterboxing.
+ * Zoom covers the screen uniformly (crops). Default leaves YouTube letterboxing,
+ * which the vertical alignment can move to the top or bottom of the window.
  */
 @SuppressWarnings("unused")
 public class FullscreenVideoScalePatch {
@@ -67,6 +69,42 @@ public class FullscreenVideoScalePatch {
     }
 
     /**
+     * Vertical position of the video in the fullscreen window, if the video is not scaled.
+     */
+    public enum VideoVerticalAlignment {
+        TOP("morphe_fullscreen_video_alignment_top", -1),
+        CENTER("morphe_fullscreen_video_alignment_center", 0),
+        BOTTOM("morphe_fullscreen_video_alignment_bottom", 1);
+
+        public final String iconBaseName;
+
+        /**
+         * Vertical direction to move the video from the center.
+         */
+        final int direction;
+
+        VideoVerticalAlignment(String iconBaseName, int direction) {
+            this.iconBaseName = iconBaseName;
+            this.direction = direction;
+        }
+    }
+
+    /**
+     * Stretch and Zoom leave no empty space to align the video in.
+     */
+    public static final class VideoAlignmentAvailability implements Setting.Availability {
+        @Override
+        public boolean isAvailable() {
+            return Settings.FULLSCREEN_VIDEO_SCALE.get() == VideoScaleMode.DEFAULT;
+        }
+
+        @Override
+        public List<Setting<?>> getParentSettings() {
+            return List.of(Settings.FULLSCREEN_VIDEO_SCALE);
+        }
+    }
+
+    /**
      * Matches YouTube's hardcoded PlayerView aspect ({@code 1.777f}).
      */
     private static final float DEFAULT_VIDEO_ASPECT = 16f / 9f;
@@ -89,10 +127,7 @@ public class FullscreenVideoScalePatch {
     private static List<SavedClipState> savedClipStates;
 
     static {
-        PlayerType.getOnChange().addObserver((PlayerType type) -> {
-            applyScale();
-            return Unit.INSTANCE;
-        });
+        PlayerType.getOnChange().addObserver((PlayerType type) -> applyScale());
     }
 
     /**
@@ -159,6 +194,7 @@ public class FullscreenVideoScalePatch {
     }
 
     public static void applyScale() {
+        CaptionViewportPatch.onPresentationChanged();
         Utils.runOnMainThread(FullscreenVideoScalePatch::applyScaleOnMainThread);
     }
 
@@ -166,7 +202,7 @@ public class FullscreenVideoScalePatch {
         try {
             View target = resolvePlayerView();
 
-            if (!shouldScale() || Settings.FULLSCREEN_VIDEO_SCALE.get() == VideoScaleMode.DEFAULT) {
+            if (!shouldApplyTransform()) {
                 detachPreDraw();
                 restoreDefaultTransform(target);
                 return;
@@ -194,7 +230,7 @@ public class FullscreenVideoScalePatch {
     }
 
     /**
-     * Scale {@code view} so the letterboxed video content fills the current window.
+     * Scale or move {@code view} so the letterboxed video content fills or aligns to the current window.
      * Does not change layout bounds (that would make the native player letterbox again).
      */
     private static void mapContentToDisplay(View view) {
@@ -223,56 +259,109 @@ public class FullscreenVideoScalePatch {
             return;
         }
 
-        final float contentLeft = (viewW - contentW) / 2f;
-        final float contentTop = (viewH - contentH) / 2f;
-
-        // Location must ignore the transform we apply; clear it first (still before draw).
-        view.setTranslationX(0f);
-        view.setTranslationY(0f);
-        view.setScaleX(1f);
-        view.setScaleY(1f);
-        int[] loc = new int[2];
-        view.getLocationOnScreen(loc);
-
-        VideoScaleMode mode = Settings.FULLSCREEN_VIDEO_SCALE.get();
-        final float pinch = Math.max(1f, DisableFullscreenGesturesPatch.getPinchScale());
-        if (mode == VideoScaleMode.ZOOM) {
-            final float scale = Math.max(displayW / contentW, displayH / contentH) * pinch;
-            view.setPivotX(contentLeft + contentW / 2f);
-            view.setPivotY(contentTop + contentH / 2f);
-            view.setScaleX(scale);
-            view.setScaleY(scale);
-            final float contentCenterX = loc[0] + contentLeft + contentW / 2f;
-            final float contentCenterY = loc[1] + contentTop + contentH / 2f;
-            view.setTranslationX(displayW / 2f - contentCenterX);
-            view.setTranslationY(displayH / 2f - contentCenterY);
+        if (!(view.getParent() instanceof View parent)) {
             return;
         }
+        // The parent location does not include the transform applied to the view itself.
+        int[] location = new int[2];
+        parent.getLocationInWindow(location);
+        // The content is centered in the view.
+        final float centerX = location[0] + view.getLeft() - parent.getScrollX() + viewW / 2f;
+        final float centerY = location[1] + view.getTop() - parent.getScrollY() + viewH / 2f;
 
-        final float scaleX = (displayW / contentW) * pinch;
-        final float scaleY = (displayH / contentH) * pinch;
-        if (pinch > 1.01f) {
-            view.setPivotX(contentLeft + contentW / 2f);
-            view.setPivotY(contentTop + contentH / 2f);
-            view.setScaleX(scaleX);
-            view.setScaleY(scaleY);
-            final float contentCenterX = loc[0] + contentLeft + contentW / 2f;
-            final float contentCenterY = loc[1] + contentTop + contentH / 2f;
-            view.setTranslationX(displayW / 2f - contentCenterX);
-            view.setTranslationY(displayH / 2f - contentCenterY);
-            return;
+        float scaleX = DisableFullscreenGesturesPatch.getPinchScale();
+        float scaleY = scaleX;
+        float translationX = displayW / 2f - centerX;
+        float translationY = displayH / 2f - centerY;
+
+        switch (Settings.FULLSCREEN_VIDEO_SCALE.get()) {
+            case DEFAULT -> {
+                translationX = 0;
+                translationY = Settings.FULLSCREEN_VIDEO_ALIGNMENT.get().direction
+                        * getAlignmentSpace(view, centerY, displayH, videoAR, scaleY);
+            }
+            case STRETCH -> {
+                scaleX *= displayW / contentW;
+                scaleY *= displayH / contentH;
+            }
+            case ZOOM -> {
+                final float fillScale = Math.max(displayW / contentW, displayH / contentH);
+                scaleX *= fillScale;
+                scaleY *= fillScale;
+            }
         }
 
-        view.setPivotX(contentLeft);
-        view.setPivotY(contentTop);
+        view.setPivotX(viewW / 2f);
+        view.setPivotY(viewH / 2f);
         view.setScaleX(scaleX);
         view.setScaleY(scaleY);
-        view.setTranslationX(-(loc[0] + contentLeft));
-        view.setTranslationY(-(loc[1] + contentTop));
+        view.setTranslationX(translationX);
+        view.setTranslationY(translationY);
+    }
+
+    /**
+     * Uses the smaller of the space above and below the video. An open panel, such as the comments
+     * in portrait, makes the app move the video up, and the video must not move under the panel.
+     *
+     * @param viewCenterY Center of the player view in the window.
+     */
+    private static float getAlignmentSpace(View playerView, float viewCenterY, int displayH,
+                                           float videoAR, float scale) {
+        float contentCenterY = viewCenterY;
+        float contentH = Math.min(playerView.getHeight(), playerView.getWidth() / videoAR);
+
+        View videoView = playerView instanceof PlayerViewInterface player
+                ? player.patch_getVideoView()
+                : null;
+        // The app lays out the video view inside the player view.
+        if (videoView != null && videoView != playerView && videoView.getHeight() > 0
+                && playerView instanceof ViewGroup group) {
+            Rect bounds = new Rect(0, 0, videoView.getWidth(), videoView.getHeight());
+            group.offsetDescendantRectToMyCoords(videoView, bounds);
+            contentCenterY += (bounds.exactCenterY() - playerView.getHeight() / 2f) * scale;
+            contentH = Math.min(bounds.height(), bounds.width() / videoAR);
+        }
+
+        final float halfHeight = contentH * scale / 2f;
+        final float spaceAbove = contentCenterY - halfHeight;
+        final float spaceBelow = displayH - contentCenterY - halfHeight;
+        return Math.max(0, Math.min(spaceAbove, spaceBelow));
+    }
+
+    /**
+     * Whether the fitted video has meaningful room to move vertically in the current window.
+     * Uses the same bounds as the alignment transform, including pinch zoom and open panels.
+     */
+    public static boolean hasVerticalAlignmentSpace() {
+        View playerView = resolvePlayerView();
+        if (playerView == null || playerView.getWidth() <= 0 || playerView.getHeight() <= 0
+                || !(playerView.getParent() instanceof View parent)) {
+            return false;
+        }
+
+        final int displayH = getDisplaySize()[1];
+        if (displayH <= 0) {
+            return false;
+        }
+
+        int[] location = new int[2];
+        parent.getLocationInWindow(location);
+        final float centerY = location[1] + playerView.getTop()
+                - parent.getScrollY() + playerView.getHeight() / 2f;
+        final float videoAR = getVideoAspectRatio(playerView,
+                playerView.getWidth(), playerView.getHeight());
+        final float pinchScale = DisableFullscreenGesturesPatch.getPinchScale();
+        final float freeSpace = getAlignmentSpace(playerView, centerY, displayH,
+                videoAR, pinchScale);
+        final float minimumSpace = 8f * playerView.getResources().getDisplayMetrics().density;
+        return freeSpace > minimumSpace;
     }
 
     private static float getVideoAspectRatio(View view, int viewW, int viewH) {
-        View child = getVideoView(view);
+        // The video view is sized to the video when the renderer does not letterbox the video itself.
+        View child = view instanceof PlayerViewInterface player
+                ? player.patch_getVideoView()
+                : null;
         if (child != null && child != view && child.getWidth() > 8 && child.getHeight() > 8) {
             float childAR = child.getWidth() / (float) child.getHeight();
             float parentAR = viewW / (float) viewH;
@@ -403,7 +492,7 @@ public class FullscreenVideoScalePatch {
 
         preDrawListener = () -> {
             try {
-                if (!shouldScale() || Settings.FULLSCREEN_VIDEO_SCALE.get() == VideoScaleMode.DEFAULT) {
+                if (!shouldApplyTransform()) {
                     View target = scaledViewRef.get();
                     if (target == null) {
                         target = resolvePlayerView();
@@ -452,7 +541,7 @@ public class FullscreenVideoScalePatch {
     }
 
     /**
-     * Stretch/Zoom maps the player onto the full window, which is only valid in
+     * Stretch, Zoom and alignment map the player onto the full window, which is only valid in
      * true fullscreen.
      * <p>
      * Landscape {@link PlayerType#WATCH_WHILE_MAXIMIZED} is the tablet / foldable
@@ -466,8 +555,10 @@ public class FullscreenVideoScalePatch {
      * @see <a href="https://github.com/MorpheApp/morphe-patches/issues/2652">#2652</a>
      */
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")
-    private static boolean shouldScale() {
-        return PlayerType.getCurrent() == PlayerType.WATCH_WHILE_FULLSCREEN;
+    private static boolean shouldApplyTransform() {
+        return PlayerType.getCurrent() == PlayerType.WATCH_WHILE_FULLSCREEN
+                && (Settings.FULLSCREEN_VIDEO_SCALE.get() != VideoScaleMode.DEFAULT
+                || Settings.FULLSCREEN_VIDEO_ALIGNMENT.get() != VideoVerticalAlignment.CENTER);
     }
 
     @Nullable
@@ -521,16 +612,6 @@ public class FullscreenVideoScalePatch {
             }
         }
         return null;
-    }
-
-    /**
-     * The video view is sized to the video when the renderer does not letterbox the video itself.
-     */
-    @Nullable
-    private static View getVideoView(View playerView) {
-        return playerView instanceof PlayerViewInterface player
-                ? player.patch_getVideoView()
-                : null;
     }
 
     private static final class SavedClipState {

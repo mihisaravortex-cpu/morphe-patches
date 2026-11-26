@@ -47,13 +47,20 @@ internal object ApplySkipSilenceFingerprint : Fingerprint(
 )
 
 /**
- * DefaultAudioSink's setSkipSilenceEnabled.
+ * DefaultAudioSink's setSkipSilenceEnabled, which stores the flag read by [ApplySkipSilenceFingerprint].
+ * Other boolean setters of the class have the same signature.
  */
 internal object SetSkipSilenceEnabledFingerprint : Fingerprint(
-    classFingerprint = ApplySkipSilenceFingerprint,
+    definingClass = { ApplySkipSilenceFingerprint.instructionMatches[1].fieldReference.definingClass },
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
-    parameters = listOf("Z")
+    parameters = listOf("Z"),
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IPUT_BOOLEAN,
+            reference = { ApplySkipSilenceFingerprint.instructionMatches[1].fieldReference }
+        )
+    )
 )
 
 /**

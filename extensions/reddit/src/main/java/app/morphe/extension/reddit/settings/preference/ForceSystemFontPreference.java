@@ -21,15 +21,10 @@ public final class ForceSystemFontPreference extends BooleanSettingPreference {
         setOnPreferenceChangeListener((preference, newValue) -> {
             if (Boolean.TRUE.equals(newValue) && Settings.CUSTOM_FONT.get()) {
                 // Force system font disables custom font mode to avoid conflicting runtime hooks.
-                AbstractPreferenceFragment.settingImportInProgress = true;
-                try {
-                    Settings.CUSTOM_FONT.save(false);
-                } finally {
-                    AbstractPreferenceFragment.settingImportInProgress = false;
-                }
+                Settings.CUSTOM_FONT.save(false);
             }
 
-            AbstractPreferenceFragment.showRestartDialog(context);
+            AbstractPreferenceFragment.setRestartNeeded();
             return true;
         });
     }

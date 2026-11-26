@@ -11,8 +11,10 @@ import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.methodCall
-import app.morphe.patcher.patch.bytecodePatch
-import app.morphe.patcher.patch.resourcePatch
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.patch.resourceXml
+import app.morphe.patcher.xml.XmlElement
+import app.morphe.patcher.util.matchAllMethodIndicesForEach
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.shared.misc.settings.preference.TextPreference
 import app.morphe.patches.shared.misc.settings.preference.noTitleUnsortedPreferenceCategory
@@ -20,45 +22,46 @@ import app.morphe.patches.youtube.misc.settings.PreferenceScreen
 import app.morphe.patches.youtube.misc.settings.settingsPatch
 import app.morphe.patches.youtube.shared.Constants.COMPATIBILITY_YOUTUBE
 import app.morphe.util.fiveRegisters
-import app.morphe.util.matchAllMethodIndicesForEach
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
 
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/youtube/patches/OverrideYouTubeMusicButtonsPatch;"
 
-private fun overrideYouTubeMusicManifestPatch() = resourcePatch{
+private val overrideYouTubeMusicManifestPatch = patch {
     compatibleWith(COMPATIBILITY_YOUTUBE)
 
     execute {
-        val manifestFile = get("AndroidManifest.xml")
-        val manifestContent = manifestFile.readText()
+        resourceXml("AndroidManifest.xml").use { manifest ->
+            // Only launchable apps are needed here, and QUERY_ALL_PACKAGES additionally exposes
+            // OEM media route providers whose route descriptors crash the app when unmarshalled.
+            fun XmlElement.declares(tag: String, name: String) = children(tag).any { it.attribute("android:name") == name }
 
-        // Only launchable apps are needed here, and QUERY_ALL_PACKAGES additionally exposes
-        // OEM media route providers whose route descriptors crash the app when unmarshalled.
-        val queryTag = "<intent><action android:name=\"android.intent.action.MAIN\"/>" +
-                "<category android:name=\"android.intent.category.LAUNCHER\"/></intent>"
-
-        if (!manifestContent.contains(queryTag)) {
-            manifestFile.writeText(
-                if (manifestContent.contains("</queries>")) {
-                    manifestContent.replace("</queries>", "$queryTag</queries>")
-                } else {
-                    manifestContent.replace(
-                        "<application",
-                        "<queries>$queryTag</queries>\n    <application"
-                    )
+            val queried = manifest.elements("queries").any { queries ->
+                queries.children("intent").any { intent ->
+                    intent.declares("action", "android.intent.action.MAIN") &&
+                            intent.declares("category", "android.intent.category.LAUNCHER")
                 }
-            )
+            }
+
+            if (!queried) {
+                val queries = manifest.elements("queries").firstOrNull() ?: run {
+                    val application = manifest.elements("application").first()
+                    application.parent!!.insertChild(application.index, "queries")
+                }
+                queries.appendChild("intent") {
+                    appendChild("action") { setAttribute("android:name", "android.intent.action.MAIN") }
+                    appendChild("category") { setAttribute("android:name", "android.intent.category.LAUNCHER") }
+                }
+            }
         }
     }
 }
 
-@Suppress("unused")
-val overrideYouTubeMusicButtonsPatch = bytecodePatch(
+val overrideYouTubeMusicButtonsPatch = patch(
     name = "Override YouTube Music buttons",
     description = "Overrides YouTube Music buttons to open Morphe Music or any compatible third-party client.",
 ) {
-    dependsOn(settingsPatch, overrideYouTubeMusicManifestPatch())
+    dependsOn(settingsPatch, overrideYouTubeMusicManifestPatch)
     compatibleWith(COMPATIBILITY_YOUTUBE)
 
     execute {
@@ -68,6 +71,20 @@ val overrideYouTubeMusicButtonsPatch = bytecodePatch(
                 TextPreference(key = "morphe_custom_music_package_name")
             )
         )
+
+        // Before Android 11, the deep link is opened only if YouTube Music is installed,
+        // otherwise the Play Store page of YouTube Music is opened instead.
+        AppDeepLinkEndpointFingerprint.let {
+            it.method.apply {
+                val index = it.instructionMatches[1].index
+
+                replaceInstruction(
+                    index,
+                    "invoke-static { ${fiveRegisters(index)} }, $EXTENSION_CLASS->" +
+                            "getApplicationInfo(Landroid/content/pm/PackageManager;Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;"
+                )
+            }
+        }
 
         arrayOf(
             "Landroid/content/Intent;->setPackage(Ljava/lang/String;)Landroid/content/Intent;"

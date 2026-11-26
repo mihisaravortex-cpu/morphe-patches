@@ -10,7 +10,10 @@ package app.morphe.patches.music.video.information
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.methodCall
+import app.morphe.patcher.patch.classDefBy
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
@@ -18,8 +21,6 @@ import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.patches.shared.misc.videoinformation.PlayerControllerSetTimeReferenceFingerprint
 import app.morphe.patches.shared.misc.videoinformation.seekSourceUnknownField
 import app.morphe.util.addInstructionsToEnd
-import app.morphe.util.addStaticFieldToExtension
-import app.morphe.util.getReference
 import app.morphe.util.indexOfFirstInstructionOrThrow
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
@@ -31,6 +32,8 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 import java.lang.ref.WeakReference
 
 internal const val EXTENSION_CLASS = "Lapp/morphe/extension/music/shared/VideoInformation;"
+private const val EXTENSION_PLAYER_INTERFACE =
+    $$"Lapp/morphe/extension/music/shared/VideoInformation$PlaybackController;"
 
 // Register layout inside the synthetic setVideoInformation(playerResponseModel) method.
 private const val REG_PLAYER_RESPONSE = 4
@@ -53,11 +56,8 @@ private var videoTimeInsertIndex = 0
 // p-registers of the current-position long parameter inside videoTimeMethod, e.g. "p2, p3".
 private lateinit var videoTimeRegisters: String
 
-private lateinit var seekSourceEnumType: String
-private lateinit var seekSourceMethodName: String
 
-@Suppress("unused")
-val musicVideoInformationPatch = bytecodePatch(
+val musicVideoInformationPatch = patch(
     description = "Hooks video ID, video time, and seekTo for YouTube Music."
 ) {
     dependsOn(sharedExtensionPatch)
@@ -66,63 +66,34 @@ val musicVideoInformationPatch = bytecodePatch(
 
     execute {
         val playerClass = VideoEndFingerprint.classDef
-        val playerType = playerClass.type
 
-        seekSourceEnumType = VideoEndFingerprint.method.parameterTypes[1].toString()
-        seekSourceMethodName = VideoEndFingerprint.method.name
-
-        // Add seekTo(J)Z to the player class so the extension can call it.
-        playerClass.methods.add(
-            ImmutableMethod(
-                playerType,
-                "seekTo",
-                listOf(ImmutableMethodParameter("J", emptySet(), "time")),
-                "Z",
-                AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                emptySet(),
-                null,
-                MutableMethodImplementation(4),
-            ).toMutable().apply {
-                addInstructions(
-                    0,
-                    """
-                        sget-object v0, ${seekSourceUnknownField(seekSourceEnumType)}
-                        invoke-virtual { p0, p1, p2, v0 }, $playerType->$seekSourceMethodName(J$seekSourceEnumType)Z
-                        move-result p1
-                        return p1
-                    """
-                )
-            }
-        )
-
-        // Wire static field + overrideVideoTime() in extension via addStaticFieldToExtension.
-        addStaticFieldToExtension(
-            EXTENSION_CLASS,
-            "overrideVideoTime",
-            "videoInformationClass",
-            playerType,
-            """
-                if-eqz v0, :ignore
-                invoke-virtual { v0, p0, p1 }, $playerType->seekTo(J)Z
-                move-result p0
-                return p0
-                :ignore
-                const/4 v0, 0x0
-                return v0
-            """
-        )
+        // The extension seeks with the player. The seek method takes the seek source as its second parameter.
+        VideoEndFingerprint.method.let { seekMethod ->
+            playerClass.addPatchInterface(
+                EXTENSION_PLAYER_INTERFACE,
+                "patch_seekTo",
+                """
+                    sget-object v0, ${seekSourceUnknownField(seekMethod.parameterTypes[1].toString())}
+                    invoke-virtual { p0, p1, p2, v0 }, $seekMethod
+                    move-result p1
+                    return p1
+                """
+            )
+        }
 
         val playerConstructorMethod = playerClass.methods.first { it.name == "<init>" }
         playerConstructorMethodRef = WeakReference(playerConstructorMethod)
-        playerConstructorIndex = playerConstructorMethod.indexOfFirstInstructionOrThrow {
-            opcode == Opcode.INVOKE_DIRECT &&
-                    getReference<MethodReference>()?.name == "<init>"
-        } + 1
+        playerConstructorIndex = playerConstructorMethod.indexOfFirstInstructionOrThrow(
+            methodCall(
+                opcode = Opcode.INVOKE_DIRECT,
+                name = "<init>"
+            )
+        ) + 1
 
-        // Store the player instance in the extension's static field each time it's created.
+        // Give the player to the extension each time it's created.
         playerConstructorMethod.addInstruction(
             playerConstructorIndex++,
-            "sput-object p0, $EXTENSION_CLASS->videoInformationClass:$playerType",
+            "invoke-static { p0 }, $EXTENSION_CLASS->setPlayer($EXTENSION_PLAYER_INTERFACE)V",
         )
 
         // Reset the extension's per-video state (time/length) whenever a new player is constructed.
@@ -160,12 +131,13 @@ val musicVideoInformationPatch = bytecodePatch(
 
         VideoIdFingerprint.method.apply {
             // Find the interface call that retrieves the video ID string from the response model.
-            val videoIdInterfaceIdx = indexOfFirstInstructionOrThrow {
-                val ref = getReference<MethodReference>()
-                (opcode == Opcode.INVOKE_INTERFACE_RANGE || opcode == Opcode.INVOKE_INTERFACE) &&
-                        ref?.returnType == "Ljava/lang/String;" &&
-                        ref.parameterTypes.isEmpty()
-            }
+            val videoIdInterfaceIdx = indexOfFirstInstructionOrThrow(
+                methodCall(
+                    opcodes = listOf(Opcode.INVOKE_INTERFACE_RANGE, Opcode.INVOKE_INTERFACE),
+                    returnType = "Ljava/lang/String;",
+                    parameters = listOf()
+                )
+            )
 
             playerResponseModelClass = (getInstruction<ReferenceInstruction>(videoIdInterfaceIdx)
                 .reference as MethodReference).definingClass

@@ -12,18 +12,19 @@ package app.morphe.patches.youtube.layout.captions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.matchAllMethodIndicesForEach
+import app.morphe.patcher.util.registersUsed
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
 import app.morphe.patches.youtube.misc.settings.settingsPatch
 import app.morphe.util.addInstructionsAtControlFlowLabel
 import app.morphe.util.findInstructionIndicesReversedOrThrow
-import app.morphe.util.getReference
-import app.morphe.util.matchAllMethodIndicesForEach
-import app.morphe.util.registersUsed
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/youtube/patches/AutoTranslateCaptionsPatch;"
@@ -32,7 +33,7 @@ private const val EXTENSION_CAPTION_TRACK_INTERFACE =
 private const val PREFERRED_CAPTION_TRACK_INTERFACE =
     $$"Lapp/morphe/extension/youtube/patches/PreferredCaptionLanguagePatch$CaptionTrackInterface;"
 
-internal val autoTranslateCaptionsPatch = bytecodePatch(
+internal val autoTranslateCaptionsPatch = patch(
     description = "Adds an option to add more auto-translate languages and sort the languages by name."
 ) {
     dependsOn(
@@ -47,9 +48,9 @@ internal val autoTranslateCaptionsPatch = bytecodePatch(
         )
 
         val labelField = CaptionTrackBuilderBuildFingerprint.instructionMatches[0]
-            .instruction.getReference<FieldReference>()!!
+            .fieldReference
         val urlField = CaptionTracksManagerAutoTranslateTracksFingerprint.instructionMatches[0]
-            .instruction.getReference<FieldReference>()!!
+            .fieldReference
 
         val setLanguageCodeMethod = CaptionTrackBuilderSetterFingerprint("Null languageCode").method
         val setUrlMethod = CaptionTrackBuilderSetterFingerprint("Null url").method
@@ -57,13 +58,11 @@ internal val autoTranslateCaptionsPatch = bytecodePatch(
 
         // Add interface and helper methods to allow extension code to call obfuscated code.
         mutableClassDefBy(CaptionTrackBuilderBuildFingerprint.method.returnType).apply {
-            interfaces.add(EXTENSION_CAPTION_TRACK_INTERFACE)
-
             // 20.x tracks are an abstract class, and the url field is in the subclass.
-            addHelperMethod(
+            addPatchInterface(
+                EXTENSION_CAPTION_TRACK_INTERFACE,
                 "patch_getUrl",
-                "Ljava/lang/String;",
-                smali = """
+                """
                     move-object v0, p0
                     check-cast v0, ${urlField.definingClass}
                     iget-object v0, v0, $urlField
@@ -71,16 +70,10 @@ internal val autoTranslateCaptionsPatch = bytecodePatch(
                 """
             )
 
-            addHelperMethod(
-                "patch_copyTranslation",
+            addPatchInterface(
                 EXTENSION_CAPTION_TRACK_INTERFACE,
-                listOf(
-                    "Ljava/lang/String;",
-                    "Ljava/lang/String;",
-                    "Ljava/lang/String;",
-                    "Ljava/lang/CharSequence;"
-                ),
-                smali = """
+                "patch_copyTranslation",
+                """
                     new-instance v0, ${CaptionTrackBuilderBuildFingerprint.classDef.type}
                     invoke-direct { v0, p0 }, ${CaptionTrackBuilderCopyConstructorFingerprint.method}
                     invoke-virtual { v0, p1 }, $setLanguageCodeMethod
@@ -117,7 +110,7 @@ internal val autoTranslateCaptionsPatch = bytecodePatch(
 
         val adapter = "${directTracks.definingClass}->patch_getAutoTranslateTracks()Ljava/util/List;"
         // Route the UI getter and the existing preferred-language interface getter through it.
-        AutoTranslateTracksCallFingerprint(autoTracks).matchAllMethodIndicesForEach { index ->
+        AutoTranslateTracksCallFingerprint.matchAllMethodIndicesForEach { index ->
             val register = getInstruction(index).registersUsed[0]
             replaceInstruction(index, "invoke-virtual/range { v$register .. v$register }, $adapter")
         }
@@ -127,10 +120,13 @@ internal val autoTranslateCaptionsPatch = bytecodePatch(
             val countMatch = instructionMatches[1]
             val count = countMatch.getInstruction<OneRegisterInstruction>().registerA
             val result = instructionMatches.last().getInstruction<OneRegisterInstruction>().registerA
+            val source = method.findFreeRegister(countMatch.index + 1, count, result)
             method.addInstructions(
                 countMatch.index + 1,
                 """
-                    invoke-static { v$count, v$result }, $EXTENSION_CLASS->getTranslationCount(ILjava/util/List;)I
+                    invoke-virtual/range { p0 .. p0 }, $translationSource
+                    move-result-object v$source
+                    invoke-static { v$count, v$result, v$source }, $EXTENSION_CLASS->getTranslationCount(ILjava/util/List;$PREFERRED_CAPTION_TRACK_INTERFACE)I
                     move-result v$count
                 """
             )

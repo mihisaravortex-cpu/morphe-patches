@@ -15,9 +15,12 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
-import app.morphe.patcher.patch.BytecodePatchContext
+import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.PatchException
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patcher.util.p0Register
 import app.morphe.patcher.util.proxy.mutableTypes.MutableClass
 import app.morphe.patcher.util.proxy.mutableTypes.MutableField
 import app.morphe.patcher.util.proxy.mutableTypes.MutableField.Companion.toMutable
@@ -27,10 +30,11 @@ import app.morphe.patcher.util.smali.toInstructions
 import app.morphe.patches.shared.misc.litho.context.conversionContextPatch
 import app.morphe.patches.shared.misc.textcomponent.hookSpannableString
 import app.morphe.patches.shared.misc.textcomponent.textComponentPatch
+import app.morphe.patches.shared.misc.videoinformation.ExoPlayerImplConstructorFingerprint
+import app.morphe.patches.shared.misc.videoinformation.PlaybackParametersSetterFingerprint
 import app.morphe.patches.shared.misc.videoinformation.PlaybackParametersToStringFingerprint
 import app.morphe.patches.shared.misc.videoinformation.PlayerControllerSetTimeReferenceFingerprint
-import app.morphe.patches.shared.misc.videoinformation.getExoPlayerImplFingerprint
-import app.morphe.patches.shared.misc.videoinformation.getPlaybackParametersSetterFingerprint
+import app.morphe.patches.shared.misc.videoinformation.VideoQualityFingerprint
 import app.morphe.patches.shared.misc.videoinformation.seekSourceUnknownField
 import app.morphe.patches.youtube.misc.addon.EXTENSION_ADD_ON_API_CLASS_DESCRIPTOR
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
@@ -48,19 +52,15 @@ import app.morphe.patches.youtube.video.videoid.hookPlayerResponseVideoId
 import app.morphe.patches.youtube.video.videoid.hookVideoId
 import app.morphe.patches.youtube.video.videoid.videoIdPatch
 import app.morphe.util.addInstructionsAtControlFlowLabel
-import app.morphe.util.getReference
 import app.morphe.util.indexOfFirstInstructionOrThrow
-import app.morphe.util.p0Register
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
-import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
-import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableField
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodImplementation
@@ -76,7 +76,7 @@ internal const val EXTENSION_PLAYBACK_SPEED_MENU_INTERFACE =
     $$"Lapp/morphe/extension/youtube/patches/VideoInformation$PlaybackSpeedMenuInterface;"
 internal const val EXTENSION_EXOPLAYER_INTERFACE =
     "Lapp/morphe/extension/shared/patches/ExoPlayerInterface;"
-private const val EXTENSION_VIDEO_QUALITY_MENU_INTERFACE =
+internal const val EXTENSION_VIDEO_QUALITY_MENU_INTERFACE =
     $$"Lapp/morphe/extension/youtube/patches/VideoInformation$VideoQualityMenuInterface;"
 internal const val EXTENSION_VIDEO_QUALITY_INTERFACE =
     $$"Lapp/morphe/extension/youtube/patches/VideoInformation$VideoQualityInterface;"
@@ -114,7 +114,7 @@ private var setPlaybackRateMethodIndex = -1
 
 private lateinit var playerStatusMethodRef : WeakReference<MutableMethod>
 
-val videoInformationPatch = bytecodePatch(
+val videoInformationPatch = patch(
     description = "Hooks YouTube to get information about the current playing video.",
 ) {
     dependsOn(
@@ -136,9 +136,12 @@ val videoInformationPatch = bytecodePatch(
         playerInitMethodRef = WeakReference(playerInitMethod)
 
         // Find the location of the first invoke-direct call and extract the register storing the 'this' object reference.
-        val initThisIndex = playerInitMethod.indexOfFirstInstructionOrThrow {
-            opcode == Opcode.INVOKE_DIRECT && getReference<MethodReference>()?.name == "<init>"
-        }
+        val initThisIndex = playerInitMethod.indexOfFirstInstructionOrThrow(
+            methodCall(
+                opcode = Opcode.INVOKE_DIRECT,
+                name = "<init>"
+            )
+        )
         playerInitInsertRegister = playerInitMethod.getInstruction<FiveRegisterInstruction>(initThisIndex).registerC
         playerInitInsertIndex = initThisIndex + 1
 
@@ -159,14 +162,22 @@ val videoInformationPatch = bytecodePatch(
             val mdxInitMethod = classDef.methods.first { MethodUtil.isConstructor(it) }
             mdxInitMethodRef = WeakReference(mdxInitMethod)
 
-            val initThisIndex = mdxInitMethod.indexOfFirstInstructionOrThrow {
-                opcode == Opcode.INVOKE_DIRECT && getReference<MethodReference>()?.name == "<init>"
-            }
+            val initThisIndex = mdxInitMethod.indexOfFirstInstructionOrThrow(
+                methodCall(
+                    opcode = Opcode.INVOKE_DIRECT,
+                    name = "<init>"
+                )
+            )
             mdxInitInsertRegister = mdxInitMethod.getInstruction<FiveRegisterInstruction>(initThisIndex).registerC
             mdxInitInsertIndex = initThisIndex + 1
 
             // Hook the MDX director for use through the extension.
-            onCreateHookMDX(EXTENSION_CLASS, "initializeMDX")
+            // Called when playing videos while casting to a big screen device.
+            mdxInitMethodRef.get()!!.insert(
+                mdxInitInsertIndex++,
+                "v$mdxInitInsertRegister",
+                "$EXTENSION_CLASS->initializeMDX($EXTENSION_PLAYER_INTERFACE)V",
+            )
 
             val mdxSeekFingerprintResultMethod = MdxSeekFingerprint.match(classDef).method
             val mdxSeekRelativeFingerprintResultMethod = MdxSeekRelativeFingerprint.match(classDef).method
@@ -181,20 +192,20 @@ val videoInformationPatch = bytecodePatch(
 
         VideoLengthFingerprint.let {
             it.method.apply {
-                val index = it.instructionMatches.last().index
-                val register = getInstruction<ThreeRegisterInstruction>(index).registerB
+                val register = getInstruction<ThreeRegisterInstruction>(
+                    it.instructionMatches.last().index
+                ).registerB
 
+                // Hooked before the boolean call, where the length is set in all branches.
                 addInstructionsAtControlFlowLabel(
-                    index,
+                    it.instructionMatches[5].index,
                     "invoke-static { v$register, v${register + 1} }, $EXTENSION_CLASS->setVideoLength(J)V",
                 )
             }
         }
 
         playerStatusMethodRef = WeakReference(
-            getPlayerStatusFingerprint(
-                PlayerStatusEnumFingerprint.originalClassDef.type
-            ).method
+            PlayerStatusFingerprint.method
         )
 
         // region Inject call for video IDs.
@@ -258,7 +269,7 @@ val videoInformationPatch = bytecodePatch(
                 method.getInstruction<TwoRegisterInstruction>(index).registerA
 
             val setPlaybackSpeedMethod =
-                instructionMatches.last().instruction.getReference<MethodReference>()!!
+                instructionMatches.last().methodReference
 
             setPlaybackSpeedMethodRef = WeakReference(
                 mutableClassDefBy(
@@ -274,7 +285,6 @@ val videoInformationPatch = bytecodePatch(
         InitializePlaybackSpeedValuesFingerprint.let {
             it.classDef.apply {
                 // Add interface and helper methods to allow extension code to call obfuscated methods.
-                interfaces.add(EXTENSION_PLAYBACK_SPEED_MENU_INTERFACE)
 
                 // Player controller field does not exist in YouTube 20.x, add the field.
                 val playerControllerField: MutableField
@@ -313,33 +323,19 @@ val videoInformationPatch = bytecodePatch(
                     )
                 }
 
-                methods.add(
-                    ImmutableMethod(
-                        type,
-                        "patch_setSpeed",
-                        listOf(
-                            ImmutableMethodParameter("F", null, null)
-                        ),
-                        "V",
-                        AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                        null,
-                        null,
-                        MutableMethodImplementation(3),
-                    ).toMutable().apply {
-                        addInstructionsWithLabels(
-                            0,
-                            """
-                                iget-object v0, p0, $playerControllerField
-                                
-                                # Check if the player controller class is null.
-                                if-eqz v0, :ignore
-                                invoke-virtual { v0, p1 }, $setPlaybackSpeedMethodReference
-                                
-                                :ignore
-                                return-void
-                            """
-                        )
-                    }
+                addPatchInterface(
+                    EXTENSION_PLAYBACK_SPEED_MENU_INTERFACE,
+                    "patch_setSpeed",
+                    """
+                        iget-object v0, p0, $playerControllerField
+
+                        # Check if the player controller class is null.
+                        if-eqz v0, :ignore
+                        invoke-virtual { v0, p1 }, $setPlaybackSpeedMethodReference
+
+                        :ignore
+                        return-void
+                    """
                 )
             }
         }
@@ -384,51 +380,40 @@ val videoInformationPatch = bytecodePatch(
                     field.type == "I"
                 }
 
+                // The IDs of the formats of the quality, the last constructor parameter.
+                val formatIdsField = fields.single { field ->
+                    field.type == it.method.parameterTypes.last()
+                }
+
                 // Add interface and helper methods to allow extension code to call obfuscated methods.
-                interfaces.add(EXTENSION_VIDEO_QUALITY_INTERFACE)
-                methods.add(
-                    ImmutableMethod(
-                        type,
-                        "patch_getQualityName",
-                        listOf(),
-                        "Ljava/lang/String;",
-                        AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                        null,
-                        null,
-                        MutableMethodImplementation(2),
-                    ).toMutable().apply {
-                        addInstructions(
-                            0,
-                            """
-                                iget-object v0, p0, $qualityNameField
-                                return-object v0
-                            """
-                        )
-                    }
+                addPatchInterface(
+                    EXTENSION_VIDEO_QUALITY_INTERFACE,
+                    "patch_getQualityName",
+                    """
+                        iget-object v0, p0, $qualityNameField
+                        return-object v0
+                    """
                 )
 
-                methods.add(
-                    ImmutableMethod(
-                        type,
-                        "patch_getResolution",
-                        listOf(),
-                        "I",
-                        AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                        null,
-                        null,
-                        MutableMethodImplementation(3),
-                    ).toMutable().apply {
-                        addInstructions(
-                            0,
-                            """
-                                iget v0, p0, $resolutionField
-                                iget-object v1, p0, $qualityNameField
-                                invoke-static { v1, v0 }, $EXTENSION_CLASS->fixVideoQualityResolution(Ljava/lang/String;I)I
-                                move-result v0
-                                return v0
-                            """
-                        )
-                    }
+                addPatchInterface(
+                    EXTENSION_VIDEO_QUALITY_INTERFACE,
+                    "patch_getResolution",
+                    """
+                        iget v0, p0, $resolutionField
+                        iget-object v1, p0, $qualityNameField
+                        invoke-static { v1, v0 }, $EXTENSION_CLASS->fixVideoQualityResolution(Ljava/lang/String;I)I
+                        move-result v0
+                        return v0
+                    """
+                )
+
+                addPatchInterface(
+                    EXTENSION_VIDEO_QUALITY_INTERFACE,
+                    "patch_getFormatIds",
+                    """
+                        iget-object v0, p0, $formatIdsField
+                        return-object v0
+                    """
                 )
             }
         }
@@ -440,41 +425,21 @@ val videoInformationPatch = bytecodePatch(
         val (onQualityItemClickListenerField, setQualityField) =
             with(SetVideoQualityFingerprint) {
                 Pair(
-                    instructionMatches[0].instruction.getReference<FieldReference>()!!,
-                    instructionMatches[1].instruction.getReference<FieldReference>()!!
+                    instructionMatches[0].fieldReference,
+                    instructionMatches[1].fieldReference
                 )
             }
 
         mutableClassDefBy(setQualityField.type).apply {
             // Add interface and helper methods to allow extension code to call obfuscated methods.
-            interfaces.add(EXTENSION_VIDEO_QUALITY_MENU_INTERFACE)
-
-            methods.add(
-                ImmutableMethod(
-                    type,
-                    "patch_setQuality",
-                    listOf(
-                        ImmutableMethodParameter(EXTENSION_VIDEO_QUALITY_INTERFACE, null, null)
-                    ),
-                    "V",
-                    AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                    null,
-                    null,
-                    MutableMethodImplementation(2),
-                ).toMutable().apply {
-                    val setQualityMenuIndexMethod = methods.single { method ->
-                        method.parameterTypes.firstOrNull() == videoQualityClassType
-                    }
-
-                    addInstructions(
-                        0,
-                        """
-                            check-cast p1, $videoQualityClassType
-                            invoke-virtual { p0, p1 }, $setQualityMenuIndexMethod
-                            return-void
-                        """
-                    )
-                }
+            val setQualityMenuIndexMethod = methods.single { method ->
+                method.parameterTypes.firstOrNull() == videoQualityClassType
+            }
+            // The parameter is cast to the obfuscated video quality class.
+            addPatchInterface(
+                EXTENSION_VIDEO_QUALITY_MENU_INTERFACE,
+                "patch_setQuality",
+                setQualityMenuIndexMethod
             )
         }
 
@@ -501,19 +466,19 @@ val videoInformationPatch = bytecodePatch(
             val (videoIsLiveMethodCall, channelIdMethodCall) =
                 with(getChannelIdFingerprint(playerResponseType)) {
                     Pair(
-                        instructionMatches[0].instruction.getReference<MethodReference>()!!,
-                        instructionMatches[1].instruction.getReference<MethodReference>()!!
+                        instructionMatches[0].methodReference,
+                        instructionMatches[1].methodReference
                     )
                 }
 
             val channelNameMethodCall = getChannelNameFingerprint(playerResponseType).instructionMatches.last()
-                .instruction.getReference<MethodReference>()!!
+                .methodReference
 
             // The helper this resolves through only exists in later targets, and the title is
             // only used by the minimal miniplayer, which is only rebuilt for those.
             val videoTitleInstructions = if (is_21_29_or_greater) {
                 val videoTitleMethodCall = getVideoTitleFingerprint(playerResponseType)
-                    .instructionMatches.first().instruction.getReference<MethodReference>()!!
+                    .instructionMatches.first().methodReference
 
                 """
                     invoke-interface { p1 }, $videoTitleMethodCall
@@ -574,6 +539,19 @@ val videoInformationPatch = bytecodePatch(
                         "invoke-direct { p0, p1 }, $helperMethod"
                     )
                 }
+
+                // A preloaded playback, such as the next Short, becomes the current one without loadVideo().
+                currentPlaybackFingerprint(playerResponseType).let { currentPlayback ->
+                    currentPlayback.method.apply {
+                        val index = currentPlayback.instructionMatches.last().index
+                        val playerResponseRegister = getInstruction<FiveRegisterInstruction>(index).registerC
+
+                        addInstruction(
+                            index,
+                            "invoke-direct { p0, v$playerResponseRegister }, $helperMethod"
+                        )
+                    }
+                }
             }
         }
 
@@ -588,7 +566,6 @@ val videoInformationPatch = bytecodePatch(
     }
 }
 
-context(patchContext: BytecodePatchContext)
 internal fun addExoPlayerHooks(extensionClass: String) {
     val playbackParametersType = PlaybackParametersToStringFingerprint.classDef.type
 
@@ -599,12 +576,11 @@ internal fun addExoPlayerHooks(extensionClass: String) {
     val playbackParametersSpeedField: FieldReference
     val playbackParametersPitchField: FieldReference
     PlaybackParametersToStringFingerprint.instructionMatches.let {
-        playbackParametersSpeedField = it.first().getFieldAccessed()
-        playbackParametersPitchField = it.last().getFieldAccessed()
+        playbackParametersSpeedField = it.first().fieldReference
+        playbackParametersPitchField = it.last().fieldReference
     }
 
-    val setPlaybackParametersFingerprint = getPlaybackParametersSetterFingerprint(playbackParametersType)
-    val setPlaybackParametersMethod = setPlaybackParametersFingerprint.method
+    val setPlaybackParametersMethod = PlaybackParametersSetterFingerprint.method
 
     // A reference to the setPlaybackParameters implementation, to call from the helper method.
     val setPlaybackParametersReference = "${setPlaybackParametersMethod.definingClass}->" +
@@ -628,7 +604,7 @@ internal fun addExoPlayerHooks(extensionClass: String) {
 
     // Capture each ExoPlayerImpl instance at its constructor.
     // More than one instance can be active at the same time, such as when crossfading.
-    getExoPlayerImplFingerprint(playbackParametersType).matchAll().forEach {
+    ExoPlayerImplConstructorFingerprint.matchAll().forEach {
         val firstInstructionMatch = it.instructionMatches.first()
         val register = firstInstructionMatch.getInstruction<FiveRegisterInstruction>().registerC
         it.method.addInstruction(
@@ -638,40 +614,23 @@ internal fun addExoPlayerHooks(extensionClass: String) {
         )
     }
 
-    setPlaybackParametersFingerprint.classDef.apply {
+    PlaybackParametersSetterFingerprint.classDef.apply {
         // Add interface and helper method to allow extension code
         // to directly set the ExoPlayer playback parameters.
-        interfaces.add(EXTENSION_EXOPLAYER_INTERFACE)
 
-        methods.add(
-            ImmutableMethod(
-                type,
-                "patch_setPlaybackParameters",
-                listOf(
-                    ImmutableMethodParameter("F", null, null),
-                    ImmutableMethodParameter("F", null, null),
-                ),
-                "V",
-                AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-                null,
-                null,
-                MutableMethodImplementation(4),
-            ).toMutable().apply {
-                addInstructions(
-                    0,
-                    """
-                        new-instance v0, $playbackParametersType
-                        invoke-direct { v0, p1, p2 }, $playbackParametersConstructorReference
-                        invoke-virtual { p0, v0 }, $setPlaybackParametersReference
-                        return-void
-                    """
-                )
-            }
+        addPatchInterface(
+            EXTENSION_EXOPLAYER_INTERFACE,
+            "patch_setPlaybackParameters",
+            """
+                new-instance v0, $playbackParametersType
+                invoke-direct { v0, p1, p2 }, $playbackParametersConstructorReference
+                invoke-virtual { p0, v0 }, $setPlaybackParametersReference
+                return-void
+            """
         )
     }
 }
 
-context(patchContext: BytecodePatchContext)
 private fun addPlayerInterfaceMethods(
     targetClass: MutableClass,
     seekToMethod: Method,
@@ -679,7 +638,6 @@ private fun addPlayerInterfaceMethods(
     getVideoTimeMethodName: String
 ) {
     // Add the interface and methods that extension calls.
-    targetClass.interfaces.add(EXTENSION_PLAYER_INTERFACE)
 
     arrayOf(
         Triple(seekToMethod, "patch_seekTo", true),
@@ -688,17 +646,6 @@ private fun addPlayerInterfaceMethods(
         // Add interface method.
         // The seek helper method takes the seek source enum as its second parameter.
         val seekSourceUnknown = seekSourceUnknownField(method.parameterTypes[1].toString())
-
-        val interfaceImplementation = ImmutableMethod(
-            targetClass.type,
-            name,
-            listOf(ImmutableMethodParameter("J", null, "time")),
-            if (returnsBoolean) "Z" else "V",
-            AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-            null,
-            null,
-            MutableMethodImplementation(4),
-        ).toMutable()
 
         var instructions = """
             sget-object v0, $seekSourceUnknown
@@ -714,43 +661,22 @@ private fun addPlayerInterfaceMethods(
             "return-void"
         }
 
-        // Insert helper method instructions.
-        interfaceImplementation.addInstructions(
-            0,
-            instructions,
-        )
-
-        targetClass.methods.add(interfaceImplementation)
+        targetClass.addPatchInterface(EXTENSION_PLAYER_INTERFACE, name, instructions)
     }
 
-    targetClass.methods.add(
-        ImmutableMethod(
-            targetClass.type,
-            "patch_getVideoTime",
-            listOf(),
-            "J",
-            AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-            null,
-            null,
-            MutableMethodImplementation(3),
-        ).toMutable().apply {
-            addInstructions(
-                0,
-                """
-                    invoke-virtual { p0 }, ${targetClass.type}->$getVideoTimeMethodName()J 
-                    move-result-wide v0
-                    return-wide v0
-                """
-            )
-        }
+    targetClass.addPatchInterface(
+        EXTENSION_PLAYER_INTERFACE,
+        "patch_getVideoTime",
+        """
+            invoke-virtual { p0 }, ${targetClass.type}->$getVideoTimeMethodName()J 
+            move-result-wide v0
+            return-wide v0
+        """
     )
 }
 
 private fun MutableMethod.insert(insertIndex: Int, register: String, descriptor: String) =
     addInstruction(insertIndex, "invoke-static { $register }, $descriptor")
-
-private fun MutableMethod.insertTimeHook(insertIndex: Int, descriptor: String) =
-    insert(insertIndex, "p1, p2", descriptor)
 
 /**
  * Hook the player controller. Called when a video is opened or the current video is changed.
@@ -769,19 +695,6 @@ internal fun onCreateHook(targetMethodClass: String, targetMethodName: String) =
     )
 
 /**
- * Hook the MDX player director. Called when playing videos while casting to a big screen device.
- *
- * @param targetMethodClass The descriptor for the class to invoke when the player controller is created.
- * @param targetMethodName The name of the static method to invoke when the player controller is created.
- */
-internal fun onCreateHookMDX(targetMethodClass: String, targetMethodName: String) =
-    mdxInitMethodRef.get()!!.insert(
-        mdxInitInsertIndex++,
-        "v$mdxInitInsertRegister",
-        "$targetMethodClass->$targetMethodName($EXTENSION_PLAYER_INTERFACE)V",
-    )
-
-/**
  * Hook the video time.
  * The hook is usually called once per second.
  *
@@ -789,8 +702,9 @@ internal fun onCreateHookMDX(targetMethodClass: String, targetMethodName: String
  * @param targetMethodName The name of the static method to invoke when the player controller is created.
  */
 fun videoTimeHook(targetMethodClass: String, targetMethodName: String) =
-    timeMethodRef.get()!!.insertTimeHook(
+    timeMethodRef.get()!!.insert(
         timeInitInsertIndex++,
+        "p1, p2",
         "$targetMethodClass->$targetMethodName(J)V",
     )
 

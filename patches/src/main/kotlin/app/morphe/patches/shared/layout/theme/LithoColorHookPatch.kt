@@ -11,8 +11,8 @@
 package app.morphe.patches.shared.layout.theme
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
-import app.morphe.patcher.patch.BytecodePatchBuilder
-import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.PatchDefinition
+import app.morphe.patcher.patch.patch
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
 import app.morphe.util.indexOfFirstInstructionReversedOrThrow
 import com.android.tools.smali.dexlib2.Opcode
@@ -58,9 +58,23 @@ fun lithoDrawableColorHook(methodDescriptor: String) {
     lithoColorOverrideHookInsertIndex += 2
 }
 
+/**
+ * Passes on the color a Litho background drawable is drawn with, after the color overrides.
+ * The patch that adds the hook must depend on [lithoColorHookPatch].
+ *
+ * @param methodDescriptor Method with the signature (Landroid/graphics/drawable/Drawable;I)V.
+ */
+fun lithoDrawableDrawnColorHook(methodDescriptor: String) {
+    // The insert index is not moved, so the color overrides added later are inserted before this call.
+    lithoColorOverrideHookRef!!.get()!!.addInstructions(
+        lithoColorOverrideHookInsertIndex,
+        "invoke-static { p0, p1 }, $methodDescriptor"
+    )
+}
+
 internal fun lithoColorHookPatch(
-    useModernHook: BytecodePatchBuilder.() -> Boolean
-) = bytecodePatch {
+    useModernHook: PatchDefinition.() -> Boolean
+) = patch {
     execute {
         val fingerprint = if (useModernHook()) {
             LithoOnBoundsChangeFingerprint

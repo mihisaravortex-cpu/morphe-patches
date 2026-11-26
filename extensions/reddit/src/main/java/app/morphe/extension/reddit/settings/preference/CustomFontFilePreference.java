@@ -95,18 +95,12 @@ public final class CustomFontFilePreference extends Preference {
             }
         }
 
-        // Suppress automatic restart prompts from the shared preference change listener.
-        AbstractPreferenceFragment.settingImportInProgress = true;
-        try {
-            preference.filePathSetting.save(uri.toString());
-            preference.refreshSummary();
-        } finally {
-            AbstractPreferenceFragment.settingImportInProgress = false;
-        }
+        preference.filePathSetting.save(uri.toString());
+        preference.refreshSummary();
 
         // Restart is only needed if custom font rendering is currently active.
         if (Settings.CUSTOM_FONT.get()) {
-            AbstractPreferenceFragment.showRestartDialog(context);
+            AbstractPreferenceFragment.setRestartNeeded();
         }
     }
 
