@@ -316,5 +316,52 @@
         <item>PINYIN</item>
         <item>NONE</item>
     </string-array>
+<!-- interaction.downloads.smartDownloadsPatch -->
+    <string-array name="morphe_smart_downloads_play_threshold_entries">
+        <item>3 plays (Default)</item>
+        <item>4 plays</item>
+        <item>5 plays</item>
+    </string-array>
+    <string-array name="morphe_smart_downloads_play_threshold_entry_values">
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+    </string-array>
 
+    <string-array name="morphe_smart_downloads_max_songs_entries">
+        <item>40 songs (Minimum)</item>
+        <item>60 songs (Default)</item>
+        <item>100 songs</item>
+        <item>Custom…</item>
+    </string-array>
+    <string-array name="morphe_smart_downloads_max_songs_entry_values">
+        <item>40</item>
+        <item>60</item>
+        <item>100</item>
+        <item>custom</item>
+    </string-array>
+
+    <string-array name="morphe_smart_downloads_inactivity_days_entries">
+        <item>After 7 days</item>
+        <item>After 14 days (Default)</item>
+        <item>After 30 days</item>
+        <item>Never</item>
+    </string-array>
+    <string-array name="morphe_smart_downloads_inactivity_days_entry_values">
+        <item>7</item>
+        <item>14</item>
+        <item>30</item>
+        <item>0</item>
+    </string-array>
+
+    <string-array name="morphe_smart_downloads_repersonalize_days_entries">
+        <item>Off (Default)</item>
+        <item>Every 1 Month (30 days)</item>
+        <item>Every 2 Months (60 days)</item>
+    </string-array>
+    <string-array name="morphe_smart_downloads_repersonalize_days_entry_values">
+        <item>0</item>
+        <item>30</item>
+        <item>60</item>
+    </string-array>
 </resources>
