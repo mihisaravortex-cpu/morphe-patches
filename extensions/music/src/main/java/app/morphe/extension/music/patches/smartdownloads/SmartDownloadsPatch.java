@@ -3,9 +3,6 @@ package app.morphe.extension.music.patches.smartdownloads;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.google.protobuf.ExtensionRegistryLite;
-import com.google.protobuf.MessageLite;
-
 import java.lang.ref.WeakReference;
 import java.util.List;
 
@@ -20,24 +17,20 @@ import app.morphe.extension.shared.patches.BaseInAppDownloadsPatch;
  * Extension bridge for Smart Downloads hooks and native CommandResolver dispatch.
  */
 @SuppressWarnings("unused")
-public final class SmartDownloadsPatch {
+public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
 
     public interface CommandDispatcher {
-        void patch_resolveCommand(MessageLite command);
+        void patch_resolveCommand(byte[] commandBytes);
     }
 
     private static volatile WeakReference<CommandDispatcher> dispatcherRef = new WeakReference<>(null);
-    @Nullable
-    private static volatile MessageLite commandDefaultInstance;
 
     private SmartDownloadsPatch() {
     }
 
-    /** Injection point: called when CommandResolver is constructed or resolves a command. */
-    public static void setCommandDispatcher(@NonNull CommandDispatcher dispatcher,
-                                            @NonNull MessageLite defaultInstance) {
+    /** Injection point: called when CommandResolver resolves a command. */
+    public static void setCommandDispatcher(@NonNull CommandDispatcher dispatcher) {
         dispatcherRef = new WeakReference<>(dispatcher);
-        commandDefaultInstance = defaultInstance;
     }
 
     /** Injection point: hooked into musicVideoTimeHook (~1000ms). */
@@ -53,7 +46,7 @@ public final class SmartDownloadsPatch {
      * Dispatches a native in-app OfflineCommand to add a song to YouTube Music's offline library.
      */
     public static boolean dispatchOfflineAdd(@NonNull String videoId) {
-        OfflineCommand cmd = BaseInAppDownloadsPatch.saveVideoCommand(videoId, List.of());
+        OfflineCommand cmd = saveVideoCommand(videoId, List.of());
         return dispatchBytes(cmd.toByteArray());
     }
 
@@ -61,25 +54,37 @@ public final class SmartDownloadsPatch {
      * Dispatches a native OfflineCommand to remove an evicted song from offline storage.
      */
     public static boolean dispatchOfflineRemove(@NonNull String videoId) {
+        OfflineVideoAction removeAction = findRemoveAction();
+        if (removeAction == null) {
+            return false;
+        }
         OfflineCommand cmd = OfflineCommand.newBuilder()
                 .setOfflineVideoEndpoint(
                         OfflineVideoEndpoint.newBuilder()
                                 .setVideoId(videoId)
-                                .setAction(OfflineVideoAction.OFFLINE_VIDEO_ACTION_REMOVE))
+                                .setAction(removeAction))
                 .build();
         return dispatchBytes(cmd.toByteArray());
     }
 
+    @Nullable
+    private static OfflineVideoAction findRemoveAction() {
+        for (OfflineVideoAction action : OfflineVideoAction.values()) {
+            String name = action.name();
+            if (name.contains("DELETE") || name.contains("REMOVE")) {
+                return action;
+            }
+        }
+        return OfflineVideoAction.forNumber(2);
+    }
+
     private static boolean dispatchBytes(byte[] commandBytes) {
         CommandDispatcher dispatcher = dispatcherRef.get();
-        MessageLite defaultInstance = commandDefaultInstance;
-        if (dispatcher == null || defaultInstance == null) {
+        if (dispatcher == null) {
             return false;
         }
         try {
-            MessageLite parsed = defaultInstance.getParserForType()
-                    .parseFrom(commandBytes, ExtensionRegistryLite.getGeneratedRegistry());
-            Utils.runOnMainThreadNowOrLater(() -> dispatcher.patch_resolveCommand(parsed));
+            Utils.runOnMainThreadNowOrLater(() -> dispatcher.patch_resolveCommand(commandBytes));
             return true;
         } catch (Exception ex) {
             Logger.printException(() -> "SmartDownloads: dispatchBytes failure", ex);
