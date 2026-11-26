@@ -29,46 +29,46 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import app.morphe.extension.music.settings.Settings;
-import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.Utils;
 
 public final class OpenAIClient {
 
-    /**
-     * The prompt template sent to the AI endpoint. One template covers both tasks;
-     * {@link #renderPrompt} fills in its variables:
-     * <ul>
-     *   <li>{@code {task}} - "translation" or "romanization"</li>
-     *   <li>{@code {language}} - the target language</li>
-     *   <li>{@code {title}}, {@code {artist}} - the song</li>
-     *   <li>{@code {count}} - the number of lines</li>
-     *   <li>{@code {lines}} - the lyric lines, one per line</li>
-     * </ul>
-     * Unknown variables are left as typed.
-     */
     public static final String DEFAULT_PROMPT = """
-            You are a professional lyrics {task} engine. Perform {task} on every line below for {language}, keeping the original meaning, tone and punctuation.
-            Song: {title} by {artist}
-            
-            Output format: Number every result on its own line, like:
-            1. first result
-            2. second result
-            
-            CRITICAL RULES:
-            - Output exactly {count} numbered lines (same as input count)
-            - Number format: "N. text" (number, period, space, text)
-            - Do NOT include the original lines in your output
-            - Do NOT use "Line N:" format
-            - Follow the standard {language} conventions for {task}; no annotations, notes or tone marks
-            - If a line already needs no {task}, output one "SKIP" for it
-            - Output ONLY the {task}. No reasoning, no explanations, no step-by-step thinking.
-            
+            You are an expert Sinhala lyricist and translator. Translate every numbered lyric line below into natural, expressive Sinhala while preserving the original meaning, emotion, tone, and punctuation.
+            Song: {title} - {artist}
+
+            Step 1 — Match the song's vibe (do not output this):
+            - Poetic, devotional, romantic, or emotional songs: use graceful, natural standard Sinhala.
+            - Humorous, playful, dance, or item songs: use lively, natural spoken/colloquial Sinhala (e.g., උඹ, බං, යකෝ, වරෙන්, බලපන්).
+            - Rap or street-style songs: use bold, rhythmic Sri Lankan street Sinhala.
+
+            Step 2 — Translation quality rules:
+            - Translate idioms, wordplay, and metaphors by their true intended meaning so it sounds like natural Sri Lankan Sinhala, never stiff word-for-word machine translation.
+            - Translate embedded foreign words into natural Sinhala or Sinhala-script slang (e.g., ස්ටෝකර්, සයිකෝ).
+            - For specific cultural terms, transliterate into Sinhala with a brief Sinhala meaning in parentheses on the FIRST occurrence only (e.g., වෛදේහි (සීතා දේවිය), ච්‍යවන්ප්‍රාශ් (ඉන්දියානු ආයුර්වේද ඖෂධීය ආහාරයක්)).
+            - Keep repeated chorus lines consistent and rhythmic.
+            - Use ONLY Sinhala script (never Singlish, Devanagari, or English letters), except for "SKIP".
+            - Output "N. SKIP" for non-translatable vocalizations (e.g., hey, oh, la la).
+
+            Step 3 — STRICT line alignment & format:
+            - Input has {count} lines numbered 1 to {count}. Output ALL {count} lines using the EXACT same line number from the input—never skip, merge, or shift numbers even when lines repeat.
+            - Output ONLY "N. translation". NEVER include the original lyrics, arrows (->), "Line N:", markdown, or notes.
+
+            Example:
+            If input is:
+            1. आई तू इधर जी
+            2. hey
+
+            CORRECT output:
+            1. උඹ මෙහෙට ආවා විතරයි
+            2. SKIP
+
+            WRONG output (NEVER do this):
+            1. आई तू इधर जी -> 1. උඹ මෙහෙට ආවා විතරයි
+
             {lines}""";
-    /**
-     * The prompt template for the section task. Where {@link #DEFAULT_PROMPT} rewrites each line,
-     * this one labels it: only the line opening a section is named, every other line is skipped,
-     * so the returned list maps onto {@code LyricsLine.songPart()} without any post-processing.
-     */
+
     public static final String SECTION_PROMPT = """
             You are a music structure analyst. Analyze the lyrics below and label the song structure.
             Song: {title} by {artist}
@@ -87,10 +87,7 @@ public final class OpenAIClient {
             - Output ONLY the labels. No reasoning, no explanations.
             
             {lines}""";
-    /**
-     * The prompt template for ruby. Each line comes back as it was, with the reading of every
-     * kanji word in brackets right after it, which {@code RubyGenerator} then reads.
-     */
+
     public static final String RUBY_PROMPT = """
             You are a professional reading engine. Add the {language} reading of every word written with kanji to each lyric line below.
             Song: {title} by {artist}
@@ -108,17 +105,15 @@ public final class OpenAIClient {
             - Output ONLY the lines. No reasoning, no explanations.
             
             {lines}""";
+
+    private static final String DEFAULT_GEMINI_BASE_URL =
+            "https://generativelanguage.googleapis.com/v1beta";
+    private static final String DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen";
     private static final int CONNECT_TIMEOUT_MS = 10_000;
-    private static final int READ_TIMEOUT_MS = 45_000;
-    private static final int GEMINI_VALIDATION_TIMEOUT_MS = 20_000;
-    private static final int GEMINI_READ_TIMEOUT_MS = 60_000;
-    private static final int MAX_CHARS = 3000;
-    private static final String MODELS_PATH_SUFFIX = "/models";
-    private static final String CHAT_PATH = "/chat/completions";
-    private static final String COMPLETIONS_PATH = "/completions";
-    /** "/v1", "/v1beta/openai", "/compatible-mode/v1" and the like. */
-    private static final Pattern VERSION_SEGMENT =
-            Pattern.compile("(?:/[^/]+)*/v\\d+(?:[a-z]+)?(?:/[^/]+)*");
+    private static final int VALIDATION_TIMEOUT_MS = 20_000;
+    private static final int READ_TIMEOUT_MS = 60_000;
+    private static final int MAX_CHARS = 12_000;
+
     private static final Pattern NUMBERED_LINE_PATTERN =
             Pattern.compile("^(?:Line\\s+)?(\\d{1,4})[.)\\]:\\-]\\s*(.*)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern SKIP_TOKEN_PATTERN = Pattern.compile(
@@ -126,249 +121,178 @@ public final class OpenAIClient {
                     + "^SKIP(?:\\s*[:.\\-–—|].*)?$",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern PROMPT_VARIABLE = Pattern.compile("\\{(\\w+)\\}");
+    private static final Pattern HAS_VERSION_PATTERN = Pattern.compile(".*/v\\d+(?:[a-z]+)?$");
+
+    @Nullable
+    private static volatile String lastError;
 
     private OpenAIClient() {
     }
 
-    private static boolean isGeminiEndpoint(@Nullable String baseUrl) {
-        return baseUrl != null
-                && baseUrl.toLowerCase(Locale.ROOT).contains("generativelanguage.googleapis.com");
+    @Nullable
+    public static String getLastError() {
+        return lastError;
+    }
+
+    private static void setLastError(@Nullable String error) {
+        lastError = error;
+    }
+
+    private static void showErrorToast(String prefix) {
+        final String err = lastError;
+        if (err == null || err.isEmpty()) {
+            return;
+        }
+        Utils.runOnMainThread(() -> Utils.showToastShort(prefix + ": " + err));
+    }
+
+    /** Normalizes any entered Gemini URL to the native API versioned root (e.g. .../v1beta). */
+    static String chatUrl(@Nullable String baseUrl) {
+        if (baseUrl == null || baseUrl.trim().isEmpty()) {
+            return DEFAULT_GEMINI_BASE_URL;
+        }
+        String base = baseUrl.trim();
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        for (String suffix : new String[]{"/chat/completions", "/completions", "/openai", "/models"}) {
+            if (base.endsWith(suffix)) {
+                base = base.substring(0, base.length() - suffix.length());
+            }
+        }
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        if (base.isEmpty()) {
+            return DEFAULT_GEMINI_BASE_URL;
+        }
+        if (base.contains("generativelanguage.googleapis.com")
+                && !HAS_VERSION_PATTERN.matcher(base).matches()) {
+            return base + "/v1beta";
+        }
+        return base;
+    }
+
+    private static String normalizeModel(@Nullable String model) {
+        if (model == null) {
+            return DEFAULT_GEMINI_MODEL;
+        }
+        String clean = model.trim().replaceFirst("^models/", "");
+        int colon = clean.indexOf(':');
+        if (colon > 0) {
+            clean = clean.substring(0, colon);
+        }
+        return clean.isEmpty() ? DEFAULT_GEMINI_MODEL : clean;
+    }
+
+    private static String cleanApiKey(@Nullable String apiToken) {
+        return apiToken == null ? "" : apiToken.replaceAll("\\s+", "");
+    }
+
+    private static String generateContentUrl(@Nullable String baseUrl, @Nullable String model) {
+        return chatUrl(baseUrl) + "/models/" + normalizeModel(model) + ":generateContent";
+    }
+
+    private static String modelsListUrl(@Nullable String baseUrl) {
+        return chatUrl(baseUrl) + "/models";
     }
 
     public static boolean validateConfig(String baseUrl, String apiToken, String model) {
-        if (baseUrl == null || baseUrl.trim().isEmpty()
-                || model == null || model.trim().isEmpty()) {
+        return validateConfig(baseUrl, apiToken, model,
+                Settings.LYRICS_AI_EXTRA_HEADERS.get(),
+                Settings.LYRICS_AI_EXTRA_BODY.get());
+    }
+
+    public static boolean validateConfig(String baseUrl, String apiToken, String model,
+                                         @Nullable String extraHeaders, @Nullable String extraBody) {
+        setLastError(null);
+        if (cleanApiKey(apiToken).isEmpty()) {
+            setLastError("Missing Gemini API Key");
             return false;
         }
-        if (isGeminiEndpoint(baseUrl)) {
-            return validateGeminiNative(apiToken, model);
+        if (model == null || model.trim().isEmpty()) {
+            setLastError("Missing Model Name");
+            return false;
+        }
+        return sendGeminiRequest(baseUrl, apiToken, model, "Reply with OK",
+                true, extraHeaders, extraBody) != null;
+    }
+
+    public static String[] fetchReasoningEfforts(String baseUrl, String apiToken, String model) {
+        String lower = normalizeModel(model).toLowerCase(Locale.ROOT);
+        if (lower.contains("hydrogen") || lower.startsWith("gemini-3")
+                || lower.startsWith("gemini-4")) {
+            return new String[]{"low", "medium", "high", "xhigh"};
+        }
+        return new String[0];
+    }
+
+    /** Fetches native Gemini models that support generateContent. */
+    public static List<String> fetchModels(String baseUrl, @Nullable String apiToken) {
+        setLastError(null);
+        List<String> ids = new ArrayList<>();
+        String cleanKey = cleanApiKey(apiToken);
+        if (cleanKey.isEmpty()) {
+            setLastError("Missing Gemini API Key");
+            return ids;
         }
         HttpURLConnection conn = null;
         try {
-            JSONObject body = new JSONObject();
-            body.put("model", model);
-            body.put("messages", new JSONArray().put(
-                    new JSONObject().put("role", "user").put("content", "hi")));
-            body.put("max_tokens", 1);
-            // Validate with the same body the feature will send, so what works here works there.
-            applyExtraBody(body);
-
-            conn = (HttpURLConnection) new URL(chatUrl(baseUrl)).openConnection();
-            conn.setRequestMethod("POST");
+            String url = modelsListUrl(baseUrl);
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod("GET");
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            conn.setReadTimeout(READ_TIMEOUT_MS);
-            conn.setRequestProperty("Content-Type", "application/json");
-            if (apiToken != null && !apiToken.isEmpty()) {
-                conn.setRequestProperty("Authorization", "Bearer " + apiToken);
-            }
-            // Applied last, so user headers override defaults.
-            applyExtraHeaders(conn);
-            conn.setDoOutput(true);
+            conn.setReadTimeout(VALIDATION_TIMEOUT_MS);
+            conn.setRequestProperty("x-goog-api-key", cleanKey);
+            applyExtraHeaders(conn, Settings.LYRICS_AI_EXTRA_HEADERS.get());
 
-            byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
-            conn.setFixedLengthStreamingMode(payload.length);
-            try (OutputStream stream = conn.getOutputStream()) {
-                stream.write(payload);
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                setLastError(formatHttpError(code, readErrorStream(conn)));
+                return ids;
             }
 
-            return conn.getResponseCode() == 200;
-        } catch (Exception ex) {
-            Logger.printDebug(() -> "Could not validate the AI endpoint", ex);
-            return false;
+            JSONObject root = new JSONObject(readResponse(conn));
+            JSONArray models = root.optJSONArray("models");
+            if (models == null) {
+                setLastError("No models returned");
+                return ids;
+            }
+            for (int i = 0; i < models.length(); i++) {
+                JSONObject m = models.optJSONObject(i);
+                if (m == null) continue;
+                JSONArray methods = m.optJSONArray("supportedGenerationMethods");
+                if (methods != null && !supportsGenerateContent(methods)) {
+                    continue;
+                }
+                String name = m.optString("name", "").replaceFirst("^models/", "").trim();
+                if (!name.isEmpty()) {
+                    ids.add(name);
+                }
+            }
+            if (ids.isEmpty()) {
+                setLastError("No compatible Gemini models found");
+            }
+        } catch (Exception e) {
+            setLastError("Network error: " + safeMsg(e));
+            Logger.printDebug(() -> "Could not fetch Gemini models", e);
         } finally {
             if (conn != null) {
                 conn.disconnect();
             }
         }
-    }
-
-    public static String[] fetchReasoningEfforts(String baseUrl, String apiToken, String model) {
-        final String models = listModels(baseUrl, apiToken);
-        if (models == null) {
-            return new String[0];
-        }
-        try {
-            return parseSupportedEfforts(models, model);
-        } catch (JSONException e) {
-            Logger.printDebug(() -> "Could not read supported reasoning efforts", e);
-            return new String[0];
-        }
-    }
-
-    /** The ids of the models the endpoint lists, empty when it lists none. */
-    public static List<String> fetchModels(String baseUrl, @Nullable String apiToken) {
-        List<String> ids = new ArrayList<>();
-        final String models = listModels(baseUrl, apiToken);
-        if (models == null) {
-            return ids;
-        }
-        try {
-            JSONArray data = new JSONObject(models).optJSONArray("data");
-            if (data != null) {
-                for (int i = 0; i < data.length(); i++) {
-                    String id = data.getJSONObject(i).optString("id", "");
-                    if (!id.isEmpty()) {
-                        ids.add(id);
-                    }
-                }
-            }
-        } catch (JSONException e) {
-            Logger.printDebug(() -> "Could not read the model list", e);
-        }
         return ids;
     }
 
-    /** The raw response of the endpoint's model list, or null if it has none. */
-    @Nullable
-    private static String listModels(String baseUrl, @Nullable String apiToken) {
-        final String url = modelsUrl(chatUrl(baseUrl));
-        if (url == null) {
-            return null;
-        }
-        try {
-            HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-            try {
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-                conn.setReadTimeout(READ_TIMEOUT_MS);
-                if (apiToken != null && !apiToken.isEmpty()) {
-                    conn.setRequestProperty("Authorization", "Bearer " + apiToken);
-                }
-                applyExtraHeaders(conn);
-                if (conn.getResponseCode() != 200) {
-                    return null;
-                }
-                return readResponse(conn);
-            } finally {
-                conn.disconnect();
-            }
-        } catch (Exception e) {
-            Logger.printDebug(() -> "Could not list the models of " + url, e);
-            return null;
-        }
-    }
-
-    /**
-     * The address to call, whether the user gave the endpoint or the service root. A path ending in
-     * a version segment gets the rest of the endpoint appended; any other path is left alone.
-     */
-    static String chatUrl(@Nullable String baseUrl) {
-        if (baseUrl == null) {
-            return null;
-        }
-        String base = baseUrl.trim();
-        if (base.isEmpty()) {
-            return null;
-        }
-        while (base.endsWith("/")) {
-            base = base.substring(0, base.length() - 1);
-        }
-        if (base.endsWith(CHAT_PATH) || base.endsWith(COMPLETIONS_PATH)) {
-            return base;
-        }
-        final int scheme = base.indexOf("://");
-        final int slash = base.indexOf('/', scheme + 3);
-        if (slash < 0) {
-            return base + CHAT_PATH;
-        }
-        final String path = base.substring(slash);
-        if (path.isEmpty() || VERSION_SEGMENT.matcher(path).matches()) {
-            return base + CHAT_PATH;
-        }
-        return base;
-    }
-
-    private static String modelsUrl(@Nullable String chatUrl) {
-        if (chatUrl == null) {
-            return null;
-        }
-        String path = chatUrl;
-        for (String suffix : new String[]{CHAT_PATH, COMPLETIONS_PATH}) {
-            if (path.endsWith(suffix)) {
-                path = path.substring(0, path.length() - suffix.length());
-                break;
-            }
-        }
-        while (path.endsWith("/")) {
-            path = path.substring(0, path.length() - 1);
-        }
-        return path.endsWith(MODELS_PATH_SUFFIX) ? path : path + MODELS_PATH_SUFFIX;
-    }
-
-    private static String[] parseSupportedEfforts(String json, String model) throws JSONException {
-        final String trimmed = json.trim();
-        JSONArray entries;
-        if (trimmed.startsWith("[")) {
-            entries = new JSONArray(trimmed);
-        } else {
-            final JSONObject root = new JSONObject(trimmed);
-            entries = root.optJSONArray("data");
-            if (entries == null) {
-                entries = root.optJSONArray("models");
-            }
-        }
-        if (entries == null) {
-            return new String[0];
-        }
-        for (int i = 0; i < entries.length(); i++) {
-            final JSONObject entry = entries.optJSONObject(i);
-            if (entry == null || !describesSameModel(entry, model)) {
-                continue;
-            }
-            final Object reasoning = entry.opt("reasoning");
-            if (!(reasoning instanceof JSONObject detail)) {
-                // A plain true/false says the model reasons but not how hard, so there is nothing
-                // to choose from and the parameter is not worth offering.
-                return new String[0];
-            }
-            final JSONArray efforts = detail.optJSONArray("supported_efforts");
-            if (efforts == null || efforts.length() == 0) {
-                return new String[0];
-            }
-            final List<String> values = new ArrayList<>(efforts.length());
-            for (int j = 0; j < efforts.length(); j++) {
-                final String value = efforts.optString(j, "").trim();
-                if (!value.isEmpty() && !values.contains(value)) {
-                    values.add(value);
-                }
-            }
-            return values.toArray(new String[0]);
-        }
-        return new String[0];
-    }
-
-    private static boolean describesSameModel(JSONObject entry, String model) {
-        if (model == null) {
-            return false;
-        }
-        final String wanted = model.trim();
-        for (String key : new String[]{"id", "name", "canonical_slug"}) {
-            final String candidate = entry.optString(key, "").trim();
-            if (candidate.isEmpty()) {
-                continue;
-            }
-            if (candidate.equalsIgnoreCase(wanted)
-                    || stripVariant(candidate).equalsIgnoreCase(stripVariant(wanted))) {
+    private static boolean supportsGenerateContent(JSONArray methods) {
+        for (int i = 0; i < methods.length(); i++) {
+            if ("generateContent".equalsIgnoreCase(methods.optString(i, ""))) {
                 return true;
-            }
-        }
-        final JSONArray aliases = entry.optJSONArray("aliases");
-        if (aliases != null) {
-            for (int i = 0; i < aliases.length(); i++) {
-                if (aliases.optString(i, "").equalsIgnoreCase(wanted)) {
-                    return true;
-                }
             }
         }
         return false;
     }
 
-    private static String stripVariant(String id) {
-        final int colon = id.indexOf(':');
-        return colon > 0 ? id.substring(0, colon) : id;
-    }
-
-    /** The stored effort, sent as typed, or empty when nothing is stored. */
     @SuppressWarnings("ConstantValue")
     public static String reasoningEffort() {
         final String configured = Settings.LYRICS_AI_REASONING_EFFORT.get();
@@ -378,7 +302,6 @@ public final class OpenAIClient {
         return "";
     }
 
-    /** An array or a bare value has no keys to lay over a body, so neither counts as one. */
     public static boolean isValidExtraBody(@Nullable String body) {
         if (body == null) return true;
         final String trimmed = body.trim();
@@ -391,10 +314,6 @@ public final class OpenAIClient {
         }
     }
 
-    /**
-     * A header list has the same shape as a body, but a value has to fit on one line and a name
-     * cannot be blank, so those are refused here rather than left to fail when a request is made.
-     */
     public static boolean isValidExtraHeaders(@Nullable String headers) {
         if (headers == null) return true;
         final String trimmed = headers.trim();
@@ -416,12 +335,8 @@ public final class OpenAIClient {
         }
     }
 
-    /**
-     * Adds the headers the endpoint asks for. An empty value removes a header we would otherwise
-     * send, so an endpoint that wants its own key instead of a bearer token can drop ours.
-     */
-    private static void applyExtraHeaders(HttpURLConnection conn) {
-        final String extra = Settings.LYRICS_AI_EXTRA_HEADERS.get();
+    private static void applyExtraHeaders(HttpURLConnection conn, @Nullable String extra) {
+        if (extra == null) return;
         final String trimmed = extra.trim();
         if (trimmed.isEmpty()) return;
 
@@ -438,17 +353,12 @@ public final class OpenAIClient {
                 }
             }
         } catch (JSONException e) {
-            // A header list that will not parse is ignored; it must not take the feature down.
-            Logger.printDebug(() -> "The stored extra request headers are not valid JSON");
+            Logger.printDebug(() -> "Invalid extra request headers JSON");
         }
     }
 
-    /**
-     * Two keys stay ours: the model, which has a setting the endpoint was validated against, and the
-     * messages, whose length decides where the answer is cut into lines.
-     */
-    private static void applyExtraBody(JSONObject body) {
-        final String extra = Settings.LYRICS_AI_EXTRA_BODY.get();
+    private static void applyExtraBody(JSONObject body, @Nullable String extra) {
+        if (extra == null) return;
         final String trimmed = extra.trim();
         if (trimmed.isEmpty()) return;
 
@@ -457,97 +367,50 @@ public final class OpenAIClient {
             final Iterator<String> keys = overlay.keys();
             while (keys.hasNext()) {
                 final String key = keys.next();
-                if (key.equals("model") || key.equals("messages")) continue;
-                // get rather than opt, so an explicit null is sent as the null it was written as.
-                body.put(key, overlay.get(key));
+                if (key.equals("contents")) continue;
+                Object val = overlay.get(key);
+                if (key.equals("generationConfig")
+                        && val instanceof JSONObject extraGen
+                        && body.optJSONObject("generationConfig") != null) {
+                    JSONObject targetGen = body.getJSONObject("generationConfig");
+                    Iterator<String> genKeys = extraGen.keys();
+                    while (genKeys.hasNext()) {
+                        String gk = genKeys.next();
+                        targetGen.put(gk, extraGen.get(gk));
+                    }
+                } else {
+                    body.put(key, val);
+                }
             }
         } catch (JSONException e) {
-            // An invalid stored body is ignored; it must not take the feature down.
-            Logger.printDebug(() -> "The stored extra request body is not valid JSON");
+            Logger.printDebug(() -> "Invalid extra request body JSON");
         }
     }
 
     @Nullable
-    static String request(String baseUrl, String apiToken, String model,
-                          String userPrompt) {
-        try {
-            if (isGeminiEndpoint(baseUrl)) {
-                return requestGeminiNative(apiToken, model, userPrompt, false);
-            }
-
-            JSONObject body = new JSONObject();
-            body.put("model", model);
-            final String effort = reasoningEffort();
-            if (!effort.isEmpty()) {
-                body.put("reasoning_effort", effort);
-            }
-
-            JSONArray messages = new JSONArray();
-            messages.put(new JSONObject()
-                    .put("role", "user")
-                    .put("content", userPrompt));
-            body.put("messages", messages);
-
-            // Applied last, so user body wins even where it disagrees with the effort.
-            applyExtraBody(body);
-
-            byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
-
-            URL url = new URL(chatUrl(baseUrl));
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            try {
-                conn.setRequestMethod("POST");
-                conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-                conn.setReadTimeout(READ_TIMEOUT_MS);
-                conn.setRequestProperty("Content-Type", "application/json");
-                if (apiToken != null && !apiToken.isEmpty()) {
-                    conn.setRequestProperty("Authorization", "Bearer " + apiToken);
-                }
-                applyExtraHeaders(conn);
-                conn.setDoOutput(true);
-
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(payload);
-                }
-
-                int code = conn.getResponseCode();
-                if (code != 200) {
-                    conn.disconnect();
-                    return null;
-                }
-
-                return parseContentFromChoices(readResponse(conn));
-            } finally {
-                conn.disconnect();
-            }
-        } catch (Exception e) {
-            Logger.printDebug(() -> "OpenAI request failed", e);
-            return null;
-        }
-    }
-
-    private static boolean validateGeminiNative(@Nullable String apiToken, String model) {
-        if (apiToken == null || apiToken.trim().isEmpty()) {
-            return false;
-        }
-        return requestGeminiNative(apiToken, model, "Reply with OK", true) != null;
+    static String request(String baseUrl, String apiToken, String model, String userPrompt) {
+        setLastError(null);
+        return sendGeminiRequest(baseUrl, apiToken, model, userPrompt, false,
+                Settings.LYRICS_AI_EXTRA_HEADERS.get(),
+                Settings.LYRICS_AI_EXTRA_BODY.get());
     }
 
     @Nullable
-    private static String requestGeminiNative(@Nullable String apiToken, String model,
-                                              String userPrompt, boolean isValidation) {
-        if (apiToken == null || apiToken.trim().isEmpty()) {
+    private static String sendGeminiRequest(@Nullable String baseUrl, @Nullable String apiToken,
+                                            @Nullable String model, String userPrompt,
+                                            boolean isValidation,
+                                            @Nullable String extraHeaders,
+                                            @Nullable String extraBody) {
+        String cleanKey = cleanApiKey(apiToken);
+        if (cleanKey.isEmpty()) {
+            setLastError("Missing Gemini API Key");
             return null;
         }
+
         HttpURLConnection conn = null;
         try {
-            String cleanModel = model == null ? "" : model.trim().replaceFirst("^models/", "");
-            if (cleanModel.isEmpty()) {
-                cleanModel = "gemini-4-hydrogen";
-            }
-
-            String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/"
-                    + cleanModel + ":generateContent";
+            String cleanModel = normalizeModel(model);
+            String endpoint = generateContentUrl(baseUrl, cleanModel);
 
             JSONObject body = new JSONObject();
             body.put("contents", new JSONArray().put(
@@ -584,14 +447,17 @@ public final class OpenAIClient {
             }
             body.put("safetySettings", safety);
 
+            applyExtraBody(body, extraBody);
+
             byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
 
             conn = (HttpURLConnection) new URL(endpoint).openConnection();
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            conn.setReadTimeout(isValidation ? GEMINI_VALIDATION_TIMEOUT_MS : GEMINI_READ_TIMEOUT_MS);
+            conn.setReadTimeout(isValidation ? VALIDATION_TIMEOUT_MS : READ_TIMEOUT_MS);
             conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("x-goog-api-key", apiToken.trim());
+            conn.setRequestProperty("x-goog-api-key", cleanKey);
+            applyExtraHeaders(conn, extraHeaders);
             conn.setDoOutput(true);
             conn.setFixedLengthStreamingMode(payload.length);
 
@@ -601,58 +467,142 @@ public final class OpenAIClient {
 
             int code = conn.getResponseCode();
             if (code != 200) {
-                if (conn.getErrorStream() != null) {
-                    try (BufferedReader errReader = new BufferedReader(
-                            new InputStreamReader(conn.getErrorStream(), StandardCharsets.UTF_8))) {
-                        StringBuilder errSb = new StringBuilder();
-                        String line;
-                        while ((line = errReader.readLine()) != null) {
-                            errSb.append(line);
-                        }
-                        Logger.printDebug(() -> "Gemini HTTP " + code + ": " + errSb);
-                    }
-                }
+                String errMsg = formatHttpError(code, readErrorStream(conn));
+                setLastError(errMsg);
+                Logger.printDebug(() -> "Gemini HTTP error: " + errMsg);
                 return null;
             }
 
-            JSONObject json = new JSONObject(readResponse(conn));
-            JSONArray candidates = json.optJSONArray("candidates");
-            if (candidates == null || candidates.length() == 0) {
-                return null;
-            }
-
-            JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
-            if (content == null) {
-                return null;
-            }
-
-            JSONArray parts = content.optJSONArray("parts");
-            if (parts == null) {
-                return null;
-            }
-
-            StringBuilder out = new StringBuilder();
-            for (int i = 0; i < parts.length(); i++) {
-                JSONObject part = parts.getJSONObject(i);
-                if (!part.optBoolean("thought", false)) {
-                    String text = part.optString("text", "");
-                    if (!text.isEmpty()) {
-                        if (out.length() > 0) {
-                            out.append('\n');
-                        }
-                        out.append(text);
-                    }
-                }
-            }
-            return out.length() > 0 ? out.toString() : null;
+            return parseGeminiResponse(readResponse(conn));
         } catch (Exception e) {
-            Logger.printDebug(() -> "Gemini native request failed", e);
+            setLastError("Error: " + safeMsg(e));
+            Logger.printDebug(() -> "Gemini request failed", e);
             return null;
         } finally {
             if (conn != null) {
                 conn.disconnect();
             }
         }
+    }
+
+    @Nullable
+    private static String parseGeminiResponse(String jsonResponse) throws JSONException {
+        JSONObject json = new JSONObject(jsonResponse);
+
+        JSONObject feedback = json.optJSONObject("promptFeedback");
+        if (feedback != null) {
+            String blockReason = feedback.optString("blockReason", "");
+            if (!blockReason.isEmpty()) {
+                setLastError("Blocked (" + blockReason + ")");
+                return null;
+            }
+        }
+
+        JSONArray candidates = json.optJSONArray("candidates");
+        if (candidates == null || candidates.length() == 0) {
+            setLastError("Empty response (no candidates)");
+            return null;
+        }
+
+        JSONObject candidate = candidates.getJSONObject(0);
+        String finishReason = candidate.optString("finishReason", "");
+
+        JSONObject content = candidate.optJSONObject("content");
+        if (content == null) {
+            setLastError(finishReason.isEmpty()
+                    ? "Empty response (no content)"
+                    : "Blocked (" + finishReason + ")");
+            return null;
+        }
+
+        JSONArray parts = content.optJSONArray("parts");
+        if (parts == null) {
+            setLastError(finishReason.isEmpty()
+                    ? "Empty response (no parts)"
+                    : "Blocked (" + finishReason + ")");
+            return null;
+        }
+
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < parts.length(); i++) {
+            JSONObject part = parts.getJSONObject(i);
+            if (!part.optBoolean("thought", false)) {
+                String text = part.optString("text", "");
+                if (!text.isEmpty()) {
+                    if (out.length() > 0) {
+                        out.append('\n');
+                    }
+                    out.append(text);
+                }
+            }
+        }
+
+        if (out.length() == 0) {
+            setLastError(finishReason.isEmpty()
+                    ? "Empty model output"
+                    : "No text (" + finishReason + ")");
+            return null;
+        }
+
+        return out.toString();
+    }
+
+    private static String formatHttpError(int code, @Nullable String errBody) {
+        String reason = switch (code) {
+            case 400 -> "Bad request";
+            case 401 -> "Unauthorized (Invalid API key)";
+            case 403 -> "Forbidden (API key restricted/invalid)";
+            case 404 -> "Model or URL not found";
+            case 429 -> "Too many requests (Rate limit)";
+            case 500 -> "Google server error";
+            case 503 -> "Model overloaded / unavailable";
+            default -> "HTTP error";
+        };
+
+        String detail = "";
+        if (errBody != null && !errBody.isEmpty()) {
+            try {
+                JSONObject obj = new JSONObject(errBody);
+                JSONObject errObj = obj.optJSONObject("error");
+                if (errObj != null) {
+                    detail = errObj.optString("message", "");
+                }
+            } catch (JSONException ignored) {
+                detail = errBody;
+            }
+        }
+
+        detail = detail.replace('\n', ' ').trim();
+        if (detail.length() > 90) {
+            detail = detail.substring(0, 90) + "...";
+        }
+        return detail.isEmpty()
+                ? code + " - " + reason
+                : code + " - " + reason + ": " + detail;
+    }
+
+    private static String readErrorStream(HttpURLConnection conn) {
+        try {
+            if (conn.getErrorStream() == null) {
+                return "";
+            }
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(conn.getErrorStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    sb.append(line);
+                }
+            }
+            return sb.toString();
+        } catch (IOException ignored) {
+            return "";
+        }
+    }
+
+    private static String safeMsg(Exception e) {
+        String msg = e.getMessage();
+        return (msg == null || msg.trim().isEmpty()) ? e.getClass().getSimpleName() : msg;
     }
 
     static String readResponse(HttpURLConnection conn) throws IOException {
@@ -665,79 +615,6 @@ public final class OpenAIClient {
             }
         }
         return sb.toString();
-    }
-
-    @Nullable
-    private static String parseContentFromChoices(String jsonResponse) throws JSONException {
-        JSONObject json = new JSONObject(jsonResponse);
-        JSONArray choices = json.optJSONArray("choices");
-        if (choices == null || choices.length() == 0) {
-            return null;
-        }
-
-        JSONObject message = choices.getJSONObject(0).optJSONObject("message");
-        if (message == null) {
-            return null;
-        }
-
-        String content = message.optString("content", "");
-        if (!content.isEmpty()) {
-            return content;
-        }
-
-        String reasoning = message.optString("reasoning", "");
-        if (!reasoning.isEmpty()) {
-            String extracted = extractLastNumberedBlock(reasoning);
-            return Objects.requireNonNullElse(extracted, reasoning);
-        }
-
-        return null;
-    }
-
-    @Nullable
-    static String extractLastNumberedBlock(String text) {
-        if (text == null || text.isEmpty()) {
-            return null;
-        }
-        String[] lines = text.split("\n", -1);
-        int blockEnd = -1;
-        for (int i = lines.length - 1; i >= 0; i--) {
-            String trimmed = lines[i].trim();
-            if (trimmed.isEmpty() || trimmed.startsWith("Line")) {
-                break;
-            }
-            if (trimmed.matches("\\d+\\..+")) {
-                if (blockEnd == -1) {
-                    blockEnd = i;
-                }
-            } else if (blockEnd != -1) {
-                break;
-            }
-        }
-        if (blockEnd == -1) {
-            return null;
-        }
-        return joinNumberedBlock(blockEnd, lines).toString();
-    }
-
-    private static StringBuilder joinNumberedBlock(int blockEnd, String[] lines) {
-        int blockStart = blockEnd;
-        while (blockStart > 0 && lines[blockStart - 1].trim().matches("\\d+\\..+")) {
-            blockStart--;
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = blockStart; i <= blockEnd; i++) {
-            String line = lines[i].trim();
-            int dot = line.indexOf('.');
-            if (dot >= 0 && dot + 1 < line.length()) {
-                line = line.substring(dot + 1).trim();
-            }
-            if (Utils.isNotEmpty(sb)) {
-                sb.append('\n');
-            }
-            sb.append(line);
-        }
-        return sb;
     }
 
     public static boolean isSkipToken(@Nullable String s) {
@@ -762,7 +639,7 @@ public final class OpenAIClient {
 
         for (int i = 0; i < end; i++) {
             String line = raw[i].trim();
-            if (line.isEmpty()) continue;
+            if (line.isEmpty() || line.startsWith("```")) continue;
             Matcher m = NUMBERED_LINE_PATTERN.matcher(line);
             if (m.matches()) {
                 int idx = Integer.parseInt(Objects.requireNonNull(m.group(1))) - 1;
@@ -796,7 +673,7 @@ public final class OpenAIClient {
         boolean anyNonEmpty = false;
         for (int i = 0; i < end && list.size() < expectedCount; i++) {
             String line = raw[i].trim();
-            if (line.isEmpty()) continue;
+            if (line.isEmpty() || line.startsWith("```")) continue;
             line = line.replaceFirst("^\\d+[.)\\]:\\-]\\s*", "").trim();
             if (isSkipToken(line)) {
                 line = "";
@@ -826,10 +703,21 @@ public final class OpenAIClient {
     @Nullable
     public static List<String> mapLines(String baseUrl, String apiToken, String model,
                                         String prompt, List<String> sourceLines) {
+        setLastError(null);
         if (!fitsOneRequest(sourceLines)) {
+            setLastError("Lyrics too long (>" + MAX_CHARS + " chars)");
+            showErrorToast("Gemini");
             return null;
         }
-        return mapResponse(request(baseUrl, apiToken, model, prompt), sourceLines);
+        String response = request(baseUrl, apiToken, model, prompt);
+        List<String> result = mapResponse(response, sourceLines);
+        if (result == null) {
+            if (lastError == null && response != null) {
+                setLastError("Format mismatch (could not parse numbered lines)");
+            }
+            showErrorToast("Gemini");
+        }
+        return result;
     }
 
     static boolean fitsOneRequest(List<String> sourceLines) {
@@ -840,7 +728,6 @@ public final class OpenAIClient {
         return totalChars <= MAX_CHARS;
     }
 
-    /** Lines up a numbered model response with the source lines, or null if it says nothing. */
     @Nullable
     static List<String> mapResponse(@Nullable String response, List<String> sourceLines) {
         if (response == null) {
@@ -880,8 +767,6 @@ public final class OpenAIClient {
         String count = String.valueOf(lines.size());
         Matcher matcher = PROMPT_VARIABLE.matcher(template);
 
-        // Use StringBuffer instead of StringBuilder for Matcher.appendReplacement
-        // to maintain compatibility with API levels below 34.
         @SuppressWarnings("StringBufferMayBeStringBuilder")
         StringBuffer out = new StringBuffer(template.length() + 256);
         while (matcher.find()) {
