@@ -13,10 +13,10 @@ import app.morphe.patches.shared.misc.fix.proto.fixProtoLibraryPatch
 import app.morphe.patches.shared.misc.fix.proto.parseByteArrayWithRegistryMethodRef
 import app.morphe.patches.shared.misc.fix.proto.protoDefaultInstanceFingerprint
 import app.morphe.patches.shared.misc.settings.preference.ListPreference
-import app.morphe.patches.shared.misc.settings.preference.Preference
 import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference
 import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPreference.Sorting
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
+import app.morphe.patches.shared.misc.settings.preference.TextPreference
 import app.morphe.patches.youtube.interaction.downloads.ResolveCommandFingerprint
 
 private const val EXTENSION_CLASS =
@@ -44,8 +44,8 @@ private val smartDownloadsResourcePatch = patch {
                     ListPreference("morphe_smart_downloads_inactivity_days"),
                     ListPreference("morphe_smart_downloads_repersonalize_days"),
                     SwitchPreference("morphe_smart_downloads_wifi_only"),
-                    Preference(key = "morphe_smart_downloads_status"),
-                    Preference(key = "morphe_smart_downloads_repersonalize_now"),
+                    TextPreference("morphe_smart_downloads_status", tag = "android.preference.Preference"),
+                    TextPreference("morphe_smart_downloads_repersonalize_now", tag = "android.preference.Preference"),
                 )
             )
         )
