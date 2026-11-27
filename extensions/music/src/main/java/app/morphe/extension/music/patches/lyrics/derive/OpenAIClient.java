@@ -147,7 +147,7 @@ public final class OpenAIClient {
     }
 
     /** Normalizes any entered Gemini URL to the native API versioned root (e.g. .../v1beta). */
-    static String chatUrl(@Nullable String baseUrl) {
+    private static String geminiBaseUrl(@Nullable String baseUrl) {
         if (baseUrl == null || baseUrl.trim().isEmpty()) {
             return DEFAULT_GEMINI_BASE_URL;
         }
@@ -173,6 +173,32 @@ public final class OpenAIClient {
         return base;
     }
 
+    static String chatUrl(@Nullable String baseUrl) {
+        if (baseUrl == null) {
+            return null;
+        }
+        String base = baseUrl.trim();
+        if (base.isEmpty()) {
+            return null;
+        }
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        if (base.endsWith("/chat/completions") || base.endsWith("/completions")) {
+            return base;
+        }
+        final int scheme = base.indexOf("://");
+        final int slash = base.indexOf('/', scheme + 3);
+        if (slash < 0) {
+            return base + "/chat/completions";
+        }
+        final String path = base.substring(slash);
+        if (path.isEmpty() || Pattern.compile("(?:/[^/]+)*/v\\d+(?:[a-z]+)?(?:/[^/]+)*").matcher(path).matches()) {
+            return base + "/chat/completions";
+        }
+        return base;
+    }
+
     private static String normalizeModel(@Nullable String model) {
         if (model == null) {
             return DEFAULT_GEMINI_MODEL;
@@ -190,11 +216,11 @@ public final class OpenAIClient {
     }
 
     private static String generateContentUrl(@Nullable String baseUrl, @Nullable String model) {
-        return chatUrl(baseUrl) + "/models/" + normalizeModel(model) + ":generateContent";
+        return geminiBaseUrl(baseUrl) + "/models/" + normalizeModel(model) + ":generateContent";
     }
 
     private static String modelsListUrl(@Nullable String baseUrl) {
-        return chatUrl(baseUrl) + "/models";
+        return geminiBaseUrl(baseUrl) + "/models";
     }
 
     public static boolean validateConfig(String baseUrl, String apiToken, String model) {
