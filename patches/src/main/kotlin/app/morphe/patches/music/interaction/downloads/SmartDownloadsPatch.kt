@@ -106,7 +106,8 @@ val smartDownloadsPatch = patch(
 
             val invokeCmd = if (fp.method.parameterTypes.size >= 2) {
                 """
-                    const/4 v1, 0x0
+                    invoke-static { }, Ljava/util/Collections;->emptyMap()Ljava/util/Map;
+                    move-result-object v1
                     invoke-virtual { p0, v0, v1 }, ${fp.method}
                 """
             } else {
