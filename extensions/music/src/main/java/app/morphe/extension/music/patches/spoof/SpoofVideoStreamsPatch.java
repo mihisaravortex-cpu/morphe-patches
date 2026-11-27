@@ -12,8 +12,6 @@ package app.morphe.extension.music.patches.spoof;
 
 import android.content.Context;
 
-import com.google.android.gms.potokens.PoToken;
-
 import java.util.List;
 
 import app.morphe.extension.music.settings.Settings;
@@ -50,7 +48,7 @@ public class SpoofVideoStreamsPatch {
     /**
      * Helper to request a Music PoToken via PotHelper when needed.
      */
-    public static PoToken getPoTokenForTrack(Context context, String videoId, String clientName) {
+    public static MusicPoTokenClient.TokenData getPoTokenForTrack(Context context, String videoId, String clientName) {
         return MusicPoTokenClient.fetchMusicPoToken(context, videoId, clientName);
     }
 }
