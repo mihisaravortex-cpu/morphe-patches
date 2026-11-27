@@ -1086,5 +1086,7 @@ Lyrics come from third-party services that are not affiliated with, sponsored, o
     <string name="morphe_smart_downloads_status_summary">Tap to view or refresh Smart Cache status</string>
     <string name="morphe_smart_downloads_repersonalize_now_title">Re-personalize / Clear Smart Cache</string>
     <string name="morphe_smart_downloads_repersonalize_now_summary">Clear non-pinned cached songs and rebuild from upcoming plays</string>
-</resources>
+    <string name="morphe_smart_downloads_like_boost_title">Instant cache on Like</string>
+    <string name="morphe_smart_downloads_battery_guard_title">Pause on low battery (&lt;15%)</string>
+ </resources>
  
