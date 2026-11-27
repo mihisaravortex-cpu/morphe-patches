@@ -29,7 +29,7 @@ public class MaxSmartDownloadsPreference extends ListPreference {
         } else {
             try {
                 int parsed = Math.max(SmartDownloadsManager.MIN_CAPACITY, Integer.parseInt(value));
-                Settings.SMART_DOWNLOADS_MAX_SONGS.save(parsed);
+                Settings.SMART_DOWNLOADS_MAX_SONGS.save(String.valueOf(parsed));
             } catch (NumberFormatException ignored) {
             }
         }
@@ -52,7 +52,7 @@ public class MaxSmartDownloadsPreference extends ListPreference {
                             Toast.makeText(context, "Minimum is 40 songs", Toast.LENGTH_SHORT).show();
                             val = SmartDownloadsManager.MIN_CAPACITY;
                         }
-                        Settings.SMART_DOWNLOADS_MAX_SONGS.save(val);
+                        Settings.SMART_DOWNLOADS_MAX_SONGS.save(String.valueOf(val));
                         setSummary(val + " songs");
                     } catch (NumberFormatException ex) {
                         Toast.makeText(context, "Invalid number", Toast.LENGTH_SHORT).show();
