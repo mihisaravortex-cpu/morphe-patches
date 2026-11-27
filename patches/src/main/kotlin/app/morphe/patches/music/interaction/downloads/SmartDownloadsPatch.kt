@@ -1,9 +1,9 @@
 package app.morphe.patches.music.interaction.downloads
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.patch
 import app.morphe.patcher.util.addPatchInterface
 import app.morphe.patcher.util.cloneParameters
@@ -28,6 +28,7 @@ import app.morphe.patches.shared.misc.settings.preference.TextPreference
 import app.morphe.patches.youtube.interaction.downloads.ResolveCommandFingerprint
 import app.morphe.util.addInstructionsAtControlFlowLabel
 import app.morphe.util.findInstructionIndicesReversedOrThrow
+import app.morphe.util.indexOfFirstInstructionOrThrow
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
@@ -42,6 +43,8 @@ private const val MENU_ITEM_CLASS =
     "Lapp/morphe/extension/music/patches/smartdownloads/SmartCacheMenuItem;"
 private const val DISPATCHER_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/smartdownloads/SmartDownloadsPatch$CommandDispatcher;"
+private const val OFFLINE_HANDLER_INTERFACE =
+    $$"Lapp/morphe/extension/music/patches/smartdownloads/SmartDownloadsPatch$OfflineHandler;"
 private const val GET_GENERATED_REGISTRY =
     "Lcom/google/protobuf/ExtensionRegistryLite;->getGeneratedRegistry()Lcom/google/protobuf/ExtensionRegistryLite;"
 
@@ -100,8 +103,9 @@ val smartDownloadsPatch = patch(
     execute {
         musicVideoTimeHook(EXTENSION_CLASS, "onVideoTimeUpdate")
 
+        val commandType = ResolveCommandFingerprint.method.parameterTypes.first().toString()
+
         ResolveCommandFingerprint.let { fp ->
-            val commandType = fp.method.parameterTypes.first().toString()
             val defaultInstanceField = protoDefaultInstance(commandType)
 
             val invokeCmd = if (fp.method.parameterTypes.size >= 2) {
@@ -132,6 +136,42 @@ val smartDownloadsPatch = patch(
             fp.method.addInstruction(
                 0,
                 "invoke-static { p0 }, $EXTENSION_CLASS->setCommandDispatcher($DISPATCHER_INTERFACE)V"
+            )
+        }
+
+        // Direct OfflineVideoEndpoint handler hook (bypasses CommandResolver routing issues).
+        MusicOfflineVideoEndpointFingerprint.let { offlineFp ->
+            val offlineParamType = offlineFp.method.parameterTypes.first().toString()
+            val bytesReg = if (offlineParamType == commandType) "p1" else "p2"
+
+            offlineFp.classDef.addPatchInterface(
+                OFFLINE_HANDLER_INTERFACE,
+                "patch_handleOffline",
+                """
+                    sget-object v0, ${protoDefaultInstance(offlineParamType)}
+                    invoke-static { }, $GET_GENERATED_REGISTRY
+                    move-result-object v1
+                    invoke-static { v0, $bytesReg, v1 }, ${parseByteArrayWithRegistryMethodRef.get()!!}
+                    move-result-object v0
+                    check-cast v0, $offlineParamType
+                    invoke-static { }, Ljava/util/Collections;->emptyMap()Ljava/util/Map;
+                    move-result-object v1
+                    invoke-virtual { p0, v0, v1 }, ${offlineFp.method}
+                    return-void
+                """
+            )
+
+            val initMethod = offlineFp.classDef.methods.first { it.name == "<init>" }
+            val initIndex = initMethod.indexOfFirstInstructionOrThrow(
+                methodCall(opcode = Opcode.INVOKE_DIRECT, name = "<init>")
+            ) + 1
+            initMethod.addInstruction(
+                initIndex,
+                "invoke-static { p0 }, $EXTENSION_CLASS->setOfflineHandler($OFFLINE_HANDLER_INTERFACE)V"
+            )
+            offlineFp.method.addInstruction(
+                0,
+                "invoke-static { p0 }, $EXTENSION_CLASS->setOfflineHandler($OFFLINE_HANDLER_INTERFACE)V"
             )
         }
 
