@@ -7,10 +7,11 @@
 
 package app.morphe.patches.shared.misc.potoken
 
-import app.morphe.patcher.patch.PatchDefinition
 import app.morphe.patcher.patch.InstallerType
 import app.morphe.patcher.patch.PatchAvailability
+import app.morphe.patcher.patch.PatchDefinition
 import app.morphe.patcher.patch.patch
+import app.morphe.patcher.patch.resourceXml
 import app.morphe.patcher.util.registersUsed
 import app.morphe.patches.all.misc.clone.setOrGetFallbackPackageName
 import app.morphe.patches.shared.misc.request.hookMediaRequest
@@ -24,6 +25,8 @@ import app.morphe.util.addInstructionsAtControlFlowLabel
 import java.util.logging.Logger
 
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/shared/patches/PoTokenProviderPatch;"
+private const val POT_HELPER_PACKAGE_NAME = "app.morphe.pot.helper"
+private const val POT_HELPER_AUTHORITY = "app.morphe.pot.helper.chimera"
 
 internal fun poTokenProviderPatch(
     originalAppPackageName: String,
@@ -52,6 +55,17 @@ internal fun poTokenProviderPatch(
             return@execute Logger.getLogger(this::class.java.name).info(
                 "PoToken provider is not required for root installation. No changes applied."
             )
+        }
+
+        // Ensure PotHelper package and Chimera ContentProvider are visible on Android 11+.
+        resourceXml("AndroidManifest.xml").use { manifest ->
+            val queries = manifest.elements("queries").firstOrNull() ?: manifest.root.appendChild("queries")
+            queries.appendChild("package") {
+                setAttribute("android:name", POT_HELPER_PACKAGE_NAME)
+            }
+            queries.appendChild("provider") {
+                setAttribute("android:authorities", POT_HELPER_AUTHORITY)
+            }
         }
 
         ServiceBindIntentUtilsFingerprint.let {
