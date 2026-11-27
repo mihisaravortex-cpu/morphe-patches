@@ -10,8 +10,6 @@
 
 package app.morphe.extension.music.patches.spoof;
 
-import android.content.Context;
-
 import java.util.List;
 
 import app.morphe.extension.music.settings.Settings;
@@ -21,10 +19,10 @@ import app.morphe.extension.shared.spoof.ClientType;
 public class SpoofVideoStreamsPatch {
 
     private static final List<ClientType> AVAILABLE_CLIENTS = List.of(
-            ClientType.TV_SABR,
-            ClientType.VISIONOS_1_02,
             ClientType.ANDROID_MUSIC_NO_SDK,
-            ClientType.ANDROID_MUSIC_REEL
+            ClientType.ANDROID_MUSIC_REEL,
+            ClientType.TV_SABR,
+            ClientType.VISIONOS_1_02
             // If not signed in to Android VR, there may be playback issues.
             // Only use it if the user has selected it.
             // ClientType.ANDROID_VR_DASH
@@ -43,12 +41,5 @@ public class SpoofVideoStreamsPatch {
      */
     public static List<ClientType> getAvailableClients() {
         return AVAILABLE_CLIENTS;
-    }
-
-    /**
-     * Helper to request a Music PoToken via PotHelper when needed.
-     */
-    public static MusicPoTokenClient.TokenData getPoTokenForTrack(Context context, String videoId, String clientName) {
-        return MusicPoTokenClient.fetchMusicPoToken(context, videoId, clientName);
     }
 }
