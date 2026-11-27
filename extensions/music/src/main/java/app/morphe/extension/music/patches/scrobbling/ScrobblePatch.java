@@ -10,6 +10,7 @@ package app.morphe.extension.music.patches.scrobbling;
 import android.media.MediaMetadata;
 import android.media.session.PlaybackState;
 
+import app.morphe.extension.music.patches.smartdownloads.SmartDownloadsManager;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 
@@ -21,6 +22,7 @@ public class ScrobblePatch {
     public static void onSetMetadata(MediaMetadata metadata) {
         try {
             ScrobbleManager.getInstance().onSetMetadata(metadata);
+            SmartDownloadsManager.getInstance().onMetadataUpdated(metadata);
         } catch (Exception ex) {
             Logger.printException(() -> "onSetMetadata failure", ex);
         }
@@ -38,14 +40,13 @@ public class ScrobblePatch {
     }
 
     public static void onLikeClicked(final String serviceName, final String videoId) {
-        // Edit: If this call is always on the main thread then runOnMainThreadNowOrLater can be removed.
         Utils.runOnMainThreadNowOrLater(() -> {
             try {
                 ScrobbleManager.getInstance().onLikeClicked(serviceName, videoId);
+                SmartDownloadsManager.getInstance().onLikeClicked(serviceName, videoId);
             } catch (Exception ex) {
                 Logger.printException(() -> "onLikeClicked failure", ex);
             }
         });
     }
 }
-
