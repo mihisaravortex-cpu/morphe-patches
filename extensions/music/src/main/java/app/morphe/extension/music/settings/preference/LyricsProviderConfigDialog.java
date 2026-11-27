@@ -310,4 +310,305 @@ final class LyricsProviderConfigDialog {
                     if (validators != null) {
                         for (Validator validator : validators) {
                             if (validator.invalid()) {
-                                Utils
+                                Utils.showToastShort(str(
+                                        "morphe_music_lyrics_ai_config_status_invalid"));
+                                return;
+                            }
+                        }
+                    }
+                    save.run();
+                    Utils.showToastShort(str("morphe_music_lyrics_ai_config_toast_saved"));
+                },
+                null,
+                str("morphe_settings_reset"),
+                () -> {
+                    reset.run();
+                    Utils.showToastShort(str("morphe_music_lyrics_ai_config_toast_reset"));
+                },
+                true
+        );
+
+        final Dialog dialog = pair.first;
+        final LinearLayout mainLayout = pair.second;
+        final ScrollView scrollView = new ScrollView(context);
+        scrollView.addView(content, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f);
+        scrollParams.bottomMargin = Dim.dp12;
+        mainLayout.addView(scrollView, mainLayout.getChildCount() - 1, scrollParams);
+        return dialog;
+    }
+
+    static LinearLayout createContent(Context context) {
+        LinearLayout content = new LinearLayout(context);
+        content.setOrientation(LinearLayout.VERTICAL);
+        return content;
+    }
+
+    private static void test(Activity context, Supplier<List<String>> request, String label) {
+        Utils.showToastShort(str("morphe_music_lyrics_ai_config_status_validating"));
+        Utils.runOnBackgroundThread(() -> {
+            List<String> result;
+            try {
+                result = request.get();
+            } catch (Exception ex) {
+                Logger.printDebug(() -> label + " validation failed", ex);
+                result = null;
+            }
+            final List<String> response = result;
+            Utils.runOnMainThread(() -> {
+                if (response != null && !response.isEmpty()) {
+                    Utils.showToastShort(str(
+                            "morphe_music_lyrics_ai_config_status_connected",
+                            label, response.get(0)));
+                } else {
+                    String err = OpenAIClient.getLastError();
+                    if (err != null && !err.isEmpty()) {
+                        Utils.showToastShort(label + ": " + err);
+                    } else {
+                        Utils.showToastShort(str(
+                                "morphe_music_lyrics_ai_config_status_failed", label));
+                    }
+                }
+            });
+        });
+    }
+
+    private static EditText addBaseUrlInput(LinearLayout section, String value,
+                                           Consumer<ProcessingProviders.EndpointPreset> onPresetPicked) {
+        final Context context = section.getContext();
+        EditText input = ThemedInput.create(context);
+        input.setText(value);
+        input.setHint(str("morphe_music_lyrics_ai_config_base_url_hint"));
+        Button presets = Glyph.DOWN.create(context);
+        presets.setContentDescription(str("morphe_music_lyrics_ai_config_base_url_presets"));
+        presets.setOnClickListener(v -> {
+            final List<ProcessingProviders.EndpointPreset> items =
+                    new ArrayList<>(ProcessingProviders.ENDPOINT_PRESETS);
+            items.sort(Comparator.comparing(ProcessingProviders.EndpointPreset::label,
+                    String.CASE_INSENSITIVE_ORDER));
+            final String[] labels = items.stream()
+                    .map(ProcessingProviders.EndpointPreset::label)
+                    .toArray(String[]::new);
+            CustomDialogListPreference.createListDialog(context,
+                    str("morphe_music_lyrics_ai_config_base_url_presets_title"),
+                    labels, labels, null, index -> {
+                        final ProcessingProviders.EndpointPreset preset = items.get(index);
+                        input.setText(preset.baseUrl());
+                        input.setSelection(input.getText().length());
+                        onPresetPicked.accept(preset);
+                    }).show();
+        });
+
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+        LinearLayout.LayoutParams buttonParams = Glyph.DOWN.params();
+        buttonParams.leftMargin = Dim.dp8;
+        row.addView(presets, buttonParams);
+        section.addView(row, 0);
+        section.addView(createLabel(context, "morphe_music_lyrics_ai_config_base_url_label"), 0);
+        return input;
+    }
+
+    private static void addReasoningRow(LinearLayout section) {
+        final Context context = section.getContext();
+        final int fg = ThemeUtils.getAppForegroundColor();
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Dim.dp12, Dim.dp10, Dim.dp12, Dim.dp10);
+        row.setVisibility(View.GONE);
+
+        TextView label = new TextView(context);
+        label.setText(str("morphe_music_lyrics_ai_config_reasoning_effort"));
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        label.setTextColor(fg);
+        row.addView(label, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView value = new TextView(context);
+        value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        value.setTextColor(fg & 0xAAFFFFFF);
+        value.setText(reasoningEffortLabel(Settings.LYRICS_AI_REASONING_EFFORT.get()));
+        row.addView(value, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = Dim.dp16;
+        section.addView(row, params);
+
+        Utils.runOnBackgroundThread(() -> {
+            final String[] supported = OpenAIClient.fetchReasoningEfforts(
+                    Settings.LYRICS_AI_BASE_URL.get(), Settings.LYRICS_AI_API_TOKEN.get(),
+                    Settings.LYRICS_AI_MODEL.get());
+            if (supported.length == 0) {
+                return;
+            }
+            final String[] efforts = new String[supported.length + 1];
+            efforts[0] = "";
+            System.arraycopy(supported, 0, efforts, 1, supported.length);
+            Utils.runOnMainThread(() -> {
+                final CharSequence[] labels = new CharSequence[efforts.length];
+                for (int i = 0; i < efforts.length; i++) {
+                    labels[i] = reasoningEffortLabel(efforts[i]);
+                }
+                row.setVisibility(View.VISIBLE);
+                row.setOnClickListener(v -> CustomDialogListPreference.createListDialog(context,
+                        str("morphe_music_lyrics_ai_config_reasoning_effort"), labels, efforts,
+                        Settings.LYRICS_AI_REASONING_EFFORT.get(), index -> {
+                            final String chosen = efforts[index];
+                            Settings.LYRICS_AI_REASONING_EFFORT.save(chosen);
+                            value.setText(reasoningEffortLabel(chosen));
+                        }).show());
+            });
+        });
+    }
+
+    private static String reasoningEffortLabel(String effort) {
+        if (effort.isEmpty()) {
+            return str("morphe_music_lyrics_ai_config_reasoning_effort_default");
+        }
+        return Character.toUpperCase(effort.charAt(0)) + effort.substring(1);
+    }
+
+    static TextView createLabel(Context context, String textKey) {
+        TextView label = new TextView(context);
+        label.setText(str(textKey));
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        label.setTextColor(ThemeUtils.getAppForegroundColor());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = Dim.dp8;
+        params.bottomMargin = Dim.dp4;
+        label.setLayoutParams(params);
+        return label;
+    }
+
+    private enum Glyph {
+        PLAY('▶', 11),
+        DOWN('▾', 13);
+
+        private static final int SIZE_DP = 36;
+
+        final char character;
+        final int sizeSp;
+
+        Glyph(char character, int sizeSp) {
+            this.character = character;
+            this.sizeSp = sizeSp;
+        }
+
+        Button create(Context context) {
+            Button button = new Button(context);
+            button.setText(String.valueOf(character));
+            button.setAllCaps(false);
+            button.setGravity(Gravity.CENTER);
+            button.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp);
+            button.setTextColor(ThemeUtils.getAppForegroundColor());
+            button.setBackground(CustomDialog.createRoundedBackground(SIZE_DP / 2,
+                    ThemeUtils.getEditTextBackground()));
+            button.setPadding(0, 0, 0, 0);
+            button.setMinWidth(0);
+            button.setMinimumWidth(0);
+            button.setMinHeight(0);
+            button.setMinimumHeight(0);
+            return button;
+        }
+
+        LinearLayout.LayoutParams params() {
+            return new LinearLayout.LayoutParams(Dim.dp36, Dim.dp36);
+        }
+    }
+
+    static EditText addInput(LinearLayout section, String labelKey, String value, boolean secret) {
+        Context context = section.getContext();
+        section.addView(createLabel(context, labelKey));
+        EditText input = ThemedInput.create(context);
+        if (secret) {
+            input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        }
+        input.setText(value);
+        section.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return input;
+    }
+
+    static void makeMultiLine(EditText input, int minLines, int maxLines) {
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        input.setSingleLine(false);
+        input.setMinLines(minLines);
+        input.setMaxLines(maxLines);
+        input.setVerticalScrollBarEnabled(true);
+    }
+
+    static void setHint(EditText input, String hintKey) {
+        input.setHint(str(hintKey));
+        input.setHintTextColor((0x99 << 24) | (ThemeUtils.getAppForegroundColor() & 0x00FFFFFF));
+    }
+
+    static EditText addModelInput(LinearLayout section, String value,
+                                  Supplier<List<String>> fetchModels) {
+        final Context context = section.getContext();
+        section.addView(createLabel(context, "morphe_music_lyrics_ai_config_model_label"));
+
+        EditText input = ThemedInput.create(context);
+        input.setText(value);
+        Button fetch = Glyph.DOWN.create(context);
+        fetch.setContentDescription(str("morphe_music_lyrics_ai_config_fetch_models"));
+        fetch.setOnClickListener(v -> {
+            Utils.showToastShort(str("morphe_music_lyrics_ai_config_fetching_models"));
+            Utils.runOnBackgroundThread(() -> {
+                List<String> models;
+                try {
+                    models = fetchModels.get();
+                } catch (Exception ex) {
+                    Logger.printDebug(() -> "Could not fetch the models", ex);
+                    models = null;
+                }
+                final List<String> fetched = models;
+                Utils.runOnMainThread(() -> showModelPicker(context, fetched, input));
+            });
+        });
+
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+        LinearLayout.LayoutParams buttonParams = Glyph.DOWN.params();
+        buttonParams.leftMargin = Dim.dp8;
+        row.addView(fetch, buttonParams);
+        section.addView(row);
+        return input;
+    }
+
+    private static void showModelPicker(Context context, @Nullable List<String> models, EditText target) {
+        if (models == null || models.isEmpty()) {
+            String err = OpenAIClient.getLastError();
+            if (err != null && !err.isEmpty()) {
+                Utils.showToastShort("Fetch models: " + err);
+            } else {
+                Utils.showToastShort(str("morphe_music_lyrics_ai_config_fetch_models_failed"));
+            }
+            return;
+        }
+        String[] items = models.toArray(new String[0]);
+        CustomDialogListPreference.createListDialog(context,
+                str("morphe_music_lyrics_ai_config_fetch_models_success"), items, items,
+                target.getText().toString().trim(), index -> {
+                    target.setText(items[index]);
+                    target.setSelection(items[index].length());
+                }).show();
+    }
+
+    private static void addTestButton(Context context, LinearLayout section, Runnable onTest) {
+        Button testButton = Glyph.PLAY.create(context);
+        testButton.setContentDescription(str("morphe_music_lyrics_ai_config_test_connection"));
+        testButton.setOnClickListener(v -> onTest.run());
+        LinearLayout.LayoutParams params = Glyph.PLAY.params();
+        params.topMargin = Dim.dp8;
+        params.bottomMargin = Dim.dp4;
+        section.addView(testButton, params);
+    }
+}
