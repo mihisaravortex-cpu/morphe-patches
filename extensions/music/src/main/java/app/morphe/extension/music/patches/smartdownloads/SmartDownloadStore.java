@@ -1,5 +1,6 @@
 package app.morphe.extension.music.patches.smartdownloads;
 
+import android.graphics.Bitmap;
 import android.os.Environment;
 
 import androidx.annotation.NonNull;
@@ -9,6 +10,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -17,6 +19,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
@@ -24,9 +28,11 @@ import app.morphe.extension.shared.Utils;
 public final class SmartDownloadStore {
 
     private static final String DIR_NAME = "SmartDownloads";
+    private static final String THUMBS_DIR = "thumbs";
     private static final String INDEX_FILE = "index.json";
 
     private final Map<String, SmartDownloadTrack> tracks = new HashMap<>();
+    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
     private long lastPersonalizationResetMs;
     private boolean loaded;
 
@@ -55,6 +61,41 @@ public final class SmartDownloadStore {
         }
     }
 
+    public void saveThumbnailAsync(@NonNull String videoId, @NonNull Bitmap bitmap) {
+        File thumb = getThumbnailFile(videoId);
+        if (thumb == null || thumb.exists()) return;
+        Bitmap copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
+        if (copy == null) return;
+        ioExecutor.submit(() -> {
+            try {
+                Bitmap scaled = Bitmap.createScaledBitmap(copy, 120, 120, true);
+                try (FileOutputStream fos = new FileOutputStream(thumb)) {
+                    scaled.compress(Bitmap.CompressFormat.JPEG, 82, fos);
+                }
+                if (scaled != copy) scaled.recycle();
+            } catch (Exception ex) {
+                Logger.printDebug(() -> "SmartDownloadStore: thumb save failed", ex);
+            } finally {
+                copy.recycle();
+            }
+        });
+    }
+
+    @Nullable
+    public File getThumbnailFile(@NonNull String videoId) {
+        if (Utils.getContext() == null) return null;
+        File dir = new File(new File(Utils.getContext().getFilesDir(), DIR_NAME), THUMBS_DIR);
+        if (!dir.exists() && !dir.mkdirs()) return null;
+        return new File(dir, videoId + ".jpg");
+    }
+
+    private void deleteThumbnail(@NonNull String videoId) {
+        File thumb = getThumbnailFile(videoId);
+        if (thumb != null && thumb.exists()) {
+            Utils.deleteQuietly(thumb);
+        }
+    }
+
     public synchronized void updateMetadata(@NonNull String videoId, @Nullable String title, @Nullable String artist) {
         ensureLoaded();
         SmartDownloadTrack track = tracks.get(videoId);
@@ -74,9 +115,7 @@ public final class SmartDownloadStore {
             track.artist = artist;
             changed = true;
         }
-        if (changed) {
-            saveLocked();
-        }
+        if (changed) saveLocked();
     }
 
     public synchronized SmartDownloadTrack recordValidPlay(@NonNull String videoId, long nowMs,
@@ -126,6 +165,7 @@ public final class SmartDownloadStore {
     public synchronized void removeTrackCompletely(@NonNull String videoId) {
         ensureLoaded();
         if (tracks.remove(videoId) != null) {
+            deleteThumbnail(videoId);
             saveLocked();
         }
     }
@@ -156,27 +196,21 @@ public final class SmartDownloadStore {
     public synchronized int getCachedCount() {
         ensureLoaded();
         int count = 0;
-        for (SmartDownloadTrack t : tracks.values()) {
-            if (t.isCached) count++;
-        }
+        for (SmartDownloadTrack t : tracks.values()) if (t.isCached) count++;
         return count;
     }
 
     public synchronized int getPinnedCount() {
         ensureLoaded();
         int count = 0;
-        for (SmartDownloadTrack t : tracks.values()) {
-            if (t.isPinned) count++;
-        }
+        for (SmartDownloadTrack t : tracks.values()) if (t.isPinned) count++;
         return count;
     }
 
     public synchronized List<SmartDownloadTrack> getAllTracksSorted() {
         ensureLoaded();
         List<SmartDownloadTrack> list = new ArrayList<>(tracks.size());
-        for (SmartDownloadTrack t : tracks.values()) {
-            list.add(copyOf(t));
-        }
+        for (SmartDownloadTrack t : tracks.values()) list.add(copyOf(t));
         list.sort((a, b) -> {
             if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
             if (a.isCached != b.isCached) return a.isCached ? -1 : 1;
@@ -189,9 +223,7 @@ public final class SmartDownloadStore {
         ensureLoaded();
         List<SmartDownloadTrack> list = new ArrayList<>();
         for (SmartDownloadTrack t : tracks.values()) {
-            if (t.isCached && !t.isPinned) {
-                list.add(copyOf(t));
-            }
+            if (t.isCached && !t.isPinned) list.add(copyOf(t));
         }
         list.sort(Comparator.comparingLong(t -> t.lastPlayedMs));
         return list;
@@ -220,9 +252,8 @@ public final class SmartDownloadStore {
         while (it.hasNext()) {
             SmartDownloadTrack t = it.next().getValue();
             if (t.isPinned) continue;
-            if (t.isCached) {
-                toDelete.add(t.videoId);
-            }
+            if (t.isCached) toDelete.add(t.videoId);
+            deleteThumbnail(t.videoId);
             it.remove();
         }
         lastPersonalizationResetMs = nowMs;
@@ -240,8 +271,7 @@ public final class SmartDownloadStore {
             if (outDir == null) return null;
             if (!outDir.exists() && !outDir.mkdirs()) return null;
             File dst = new File(outDir, "Morphe_SmartCache_Backup.json");
-            byte[] data = Files.readAllBytes(src.toPath());
-            Files.write(dst.toPath(), data);
+            Files.write(dst.toPath(), Files.readAllBytes(src.toPath()));
             return dst.getAbsolutePath();
         } catch (Exception ex) {
             Logger.printException(() -> "SmartDownloadStore: exportBackup failed", ex);
@@ -257,14 +287,10 @@ public final class SmartDownloadStore {
             JSONObject root = new JSONObject();
             root.put("lastPersonalizationResetMs", lastPersonalizationResetMs);
             JSONArray array = new JSONArray();
-            for (SmartDownloadTrack t : tracks.values()) {
-                array.put(t.toJson());
-            }
+            for (SmartDownloadTrack t : tracks.values()) array.put(t.toJson());
             root.put("tracks", array);
             Files.write(temp.toPath(), root.toString().getBytes(StandardCharsets.UTF_8));
-            if (file.exists() && !file.delete()) {
-                Logger.printDebug(() -> "SmartDownloadStore: could not replace index.json");
-            }
+            if (file.exists()) Utils.deleteQuietly(file);
             if (!temp.renameTo(file)) {
                 Files.write(file.toPath(), root.toString().getBytes(StandardCharsets.UTF_8));
                 Utils.deleteQuietly(temp);
@@ -278,9 +304,7 @@ public final class SmartDownloadStore {
     private File indexFile() {
         if (Utils.getContext() == null) return null;
         File dir = new File(Utils.getContext().getFilesDir(), DIR_NAME);
-        if (!dir.exists() && !dir.mkdirs()) {
-            return null;
-        }
+        if (!dir.exists() && !dir.mkdirs()) return null;
         return new File(dir, INDEX_FILE);
     }
 
