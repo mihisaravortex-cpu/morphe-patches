@@ -15,9 +15,6 @@ import app.morphe.extension.shared.innertube.Offline.OfflineVideoAction;
 import app.morphe.extension.shared.innertube.Offline.OfflineVideoEndpoint;
 import app.morphe.extension.shared.patches.BaseInAppDownloadsPatch;
 
-/**
- * Extension bridge for Smart Downloads hooks and native CommandResolver dispatch.
- */
 @SuppressWarnings("unused")
 public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
 
@@ -25,17 +22,24 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
         void patch_resolveCommand(byte[] commandBytes);
     }
 
+    public interface OfflineHandler {
+        void patch_handleOffline(byte[] commandBytes, byte[] endpointBytes);
+    }
+
     private static volatile WeakReference<CommandDispatcher> dispatcherRef = new WeakReference<>(null);
+    private static volatile WeakReference<OfflineHandler> offlineHandlerRef = new WeakReference<>(null);
 
     private SmartDownloadsPatch() {
     }
 
-    /** Injection point: called when CommandResolver resolves a command. */
     public static void setCommandDispatcher(@NonNull CommandDispatcher dispatcher) {
         dispatcherRef = new WeakReference<>(dispatcher);
     }
 
-    /** Injection point: hooked into musicVideoTimeHook (~1000ms). */
+    public static void setOfflineHandler(@NonNull OfflineHandler handler) {
+        offlineHandlerRef = new WeakReference<>(handler);
+    }
+
     public static void onVideoTimeUpdate(long currentPlaybackTimeMs) {
         try {
             SmartDownloadsManager.getInstance().onPlaybackTick(currentPlaybackTimeMs);
@@ -44,29 +48,22 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
         }
     }
 
-    /**
-     * Dispatches a native in-app OfflineCommand to add a song to YouTube Music's offline library.
-     */
     public static boolean dispatchOfflineAdd(@NonNull String videoId) {
         OfflineCommand cmd = saveVideoCommand(videoId, List.of());
-        return dispatchBytes(cmd.toByteArray());
+        return dispatch(cmd.toByteArray(), cmd.getOfflineVideoEndpoint().toByteArray());
     }
 
-    /**
-     * Dispatches a native OfflineCommand to remove an evicted song from offline storage.
-     */
     public static boolean dispatchOfflineRemove(@NonNull String videoId) {
         OfflineVideoAction removeAction = findRemoveAction();
-        if (removeAction == null) {
-            return false;
-        }
-        OfflineCommand cmd = OfflineCommand.newBuilder()
-                .setOfflineVideoEndpoint(
-                        OfflineVideoEndpoint.newBuilder()
-                                .setVideoId(videoId)
-                                .setAction(removeAction))
+        if (removeAction == null) return false;
+        OfflineVideoEndpoint endpoint = OfflineVideoEndpoint.newBuilder()
+                .setVideoId(videoId)
+                .setAction(removeAction)
                 .build();
-        return dispatchBytes(cmd.toByteArray());
+        OfflineCommand cmd = OfflineCommand.newBuilder()
+                .setOfflineVideoEndpoint(endpoint)
+                .build();
+        return dispatch(cmd.toByteArray(), endpoint.toByteArray());
     }
 
     @Nullable
@@ -80,17 +77,22 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
         return OfflineVideoAction.forNumber(2);
     }
 
-    private static boolean dispatchBytes(byte[] commandBytes) {
+    private static boolean dispatch(byte[] commandBytes, byte[] endpointBytes) {
+        OfflineHandler offlineHandler = offlineHandlerRef.get();
         CommandDispatcher dispatcher = dispatcherRef.get();
-        if (dispatcher == null) {
+        if (offlineHandler == null && dispatcher == null) {
             return false;
         }
         try {
             Utils.runOnMainThreadNowOrLater(() -> {
                 try {
-                    dispatcher.patch_resolveCommand(commandBytes);
+                    if (offlineHandler != null) {
+                        offlineHandler.patch_handleOffline(commandBytes, endpointBytes);
+                    } else {
+                        dispatcher.patch_resolveCommand(commandBytes);
+                    }
                 } catch (Throwable ex) {
-                    Logger.printException(() -> "SmartDownloads: patch_resolveCommand error", ex);
+                    Logger.printException(() -> "SmartDownloads: dispatch error", ex);
                     if (Utils.getContext() != null) {
                         Toast.makeText(Utils.getContext(),
                                 "SmartDL Err: " + ex.getClass().getSimpleName() + ": " + ex.getMessage(),
@@ -100,7 +102,7 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
             });
             return true;
         } catch (Exception ex) {
-            Logger.printException(() -> "SmartDownloads: dispatchBytes failure", ex);
+            Logger.printException(() -> "SmartDownloads: dispatch failure", ex);
             return false;
         }
     }
