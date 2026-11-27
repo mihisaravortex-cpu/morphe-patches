@@ -43,3 +43,46 @@ public class SpoofVideoStreamsPatch {
         return AVAILABLE_CLIENTS;
     }
 }
+package app.morphe.extension.music.patches.spoof;
+
+import android.content.Context;
+
+import com.google.android.gms.potokens.PoToken;
+
+import java.util.List;
+
+import app.morphe.extension.music.settings.Settings;
+import app.morphe.extension.shared.spoof.ClientType;
+
+@SuppressWarnings("unused")
+public class SpoofVideoStreamsPatch {
+
+    private static final List<ClientType> AVAILABLE_CLIENTS = List.of(
+            ClientType.TV_SABR,
+            ClientType.VISIONOS_1_02,
+            ClientType.ANDROID_MUSIC_NO_SDK,
+            ClientType.ANDROID_MUSIC_REEL
+    );
+
+    /**
+     * Injection point.
+     */
+    public static void setClientOrderToUse() {
+        app.morphe.extension.shared.spoof.SpoofVideoStreamsPatch.setClientsToUse(
+                AVAILABLE_CLIENTS, Settings.SPOOF_VIDEO_STREAMS_CLIENT_TYPE.get());
+    }
+
+    /**
+     * @return The clients a download may resolve its stream with, whether spoofing is on.
+     */
+    public static List<ClientType> getAvailableClients() {
+        return AVAILABLE_CLIENTS;
+    }
+
+    /**
+     * Helper to request a Music PoToken via PotHelper when needed.
+     */
+    public static PoToken getPoTokenForTrack(Context context, String videoId, String clientName) {
+        return MusicPoTokenClient.fetchMusicPoToken(context, videoId, clientName);
+    }
+}
