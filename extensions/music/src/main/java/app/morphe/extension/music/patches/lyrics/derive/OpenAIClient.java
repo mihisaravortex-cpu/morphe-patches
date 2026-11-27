@@ -616,7 +616,51 @@ public final class OpenAIClient {
         }
         return sb.toString();
     }
+   @Nullable
+    static String extractLastNumberedBlock(String text) {
+        if (text == null || text.isEmpty()) {
+            return null;
+        }
+        String[] lines = text.split("\n", -1);
+        int blockEnd = -1;
+        for (int i = lines.length - 1; i >= 0; i--) {
+            String trimmed = lines[i].trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("Line")) {
+                break;
+            }
+            if (trimmed.matches("\\d+\\..+")) {
+                if (blockEnd == -1) {
+                    blockEnd = i;
+                }
+            } else if (blockEnd != -1) {
+                break;
+            }
+        }
+        if (blockEnd == -1) {
+            return null;
+        }
+        return joinNumberedBlock(blockEnd, lines).toString();
+    }
 
+    private static StringBuilder joinNumberedBlock(int blockEnd, String[] lines) {
+        int blockStart = blockEnd;
+        while (blockStart > 0 && lines[blockStart - 1].trim().matches("\\d+\\..+")) {
+            blockStart--;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = blockStart; i <= blockEnd; i++) {
+            String line = lines[i].trim();
+            int dot = line.indexOf('.');
+            if (dot >= 0 && dot + 1 < line.length()) {
+                line = line.substring(dot + 1).trim();
+            }
+            if (Utils.isNotEmpty(sb)) {
+                sb.append('\n');
+            }
+            sb.append(line);
+        }
+        return sb;
+    }
     public static boolean isSkipToken(@Nullable String s) {
         if (s == null) return true;
         String t = s.trim();
