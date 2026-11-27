@@ -1,5 +1,7 @@
 package app.morphe.extension.music.patches.smartdownloads;
 
+import android.os.Environment;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -19,9 +21,6 @@ import java.util.Map;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 
-/**
- * Thread-safe persistent JSON store at {filesDir}/SmartDownloads/index.json.
- */
 public final class SmartDownloadStore {
 
     private static final String DIR_NAME = "SmartDownloads";
@@ -56,7 +55,32 @@ public final class SmartDownloadStore {
         }
     }
 
-    public synchronized SmartDownloadTrack recordValidPlay(@NonNull String videoId, long nowMs) {
+    public synchronized void updateMetadata(@NonNull String videoId, @Nullable String title, @Nullable String artist) {
+        ensureLoaded();
+        SmartDownloadTrack track = tracks.get(videoId);
+        if (track == null) {
+            track = new SmartDownloadTrack(videoId);
+            long now = System.currentTimeMillis();
+            track.firstPlayedMs = now;
+            track.lastPlayedMs = now;
+            tracks.put(videoId, track);
+        }
+        boolean changed = false;
+        if (title != null && !title.isBlank() && !title.equals(track.title)) {
+            track.title = title;
+            changed = true;
+        }
+        if (artist != null && !artist.isBlank() && !artist.equals(track.artist)) {
+            track.artist = artist;
+            changed = true;
+        }
+        if (changed) {
+            saveLocked();
+        }
+    }
+
+    public synchronized SmartDownloadTrack recordValidPlay(@NonNull String videoId, long nowMs,
+                                                           @Nullable String title, @Nullable String artist) {
         ensureLoaded();
         SmartDownloadTrack track = tracks.get(videoId);
         if (track == null) {
@@ -64,17 +88,12 @@ public final class SmartDownloadStore {
             track.firstPlayedMs = nowMs;
             tracks.put(videoId, track);
         }
+        if (title != null && !title.isBlank()) track.title = title;
+        if (artist != null && !artist.isBlank()) track.artist = artist;
         track.playCount++;
         track.lastPlayedMs = nowMs;
         saveLocked();
         return copyOf(track);
-    }
-
-    @Nullable
-    public synchronized SmartDownloadTrack getTrack(@NonNull String videoId) {
-        ensureLoaded();
-        SmartDownloadTrack track = tracks.get(videoId);
-        return track != null ? copyOf(track) : null;
     }
 
     public synchronized void markCached(@NonNull String videoId, long nowMs, long sizeBytes) {
@@ -104,7 +123,14 @@ public final class SmartDownloadStore {
         }
     }
 
-    public synchronized boolean togglePin(@NonNull String videoId) {
+    public synchronized void removeTrackCompletely(@NonNull String videoId) {
+        ensureLoaded();
+        if (tracks.remove(videoId) != null) {
+            saveLocked();
+        }
+    }
+
+    public synchronized boolean togglePin(@NonNull String videoId, @Nullable String title, @Nullable String artist) {
         ensureLoaded();
         SmartDownloadTrack track = tracks.get(videoId);
         if (track == null) {
@@ -114,6 +140,8 @@ public final class SmartDownloadStore {
             track.lastPlayedMs = now;
             tracks.put(videoId, track);
         }
+        if (title != null && !title.isBlank()) track.title = title;
+        if (artist != null && !artist.isBlank()) track.artist = artist;
         track.isPinned = !track.isPinned;
         saveLocked();
         return track.isPinned;
@@ -134,18 +162,29 @@ public final class SmartDownloadStore {
         return count;
     }
 
-    public synchronized long getTotalCachedBytes() {
+    public synchronized int getPinnedCount() {
         ensureLoaded();
-        long total = 0L;
+        int count = 0;
         for (SmartDownloadTrack t : tracks.values()) {
-            if (t.isCached) total += Math.max(0L, t.sizeBytes);
+            if (t.isPinned) count++;
         }
-        return total;
+        return count;
     }
 
-    /**
-     * Returns unpinned cached tracks sorted by lastPlayedMs ascending (LRU first).
-     */
+    public synchronized List<SmartDownloadTrack> getAllTracksSorted() {
+        ensureLoaded();
+        List<SmartDownloadTrack> list = new ArrayList<>(tracks.size());
+        for (SmartDownloadTrack t : tracks.values()) {
+            list.add(copyOf(t));
+        }
+        list.sort((a, b) -> {
+            if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
+            if (a.isCached != b.isCached) return a.isCached ? -1 : 1;
+            return Long.compare(b.lastPlayedMs, a.lastPlayedMs);
+        });
+        return list;
+    }
+
     public synchronized List<SmartDownloadTrack> getCachedUnpinnedLruOrder() {
         ensureLoaded();
         List<SmartDownloadTrack> list = new ArrayList<>();
@@ -158,9 +197,6 @@ public final class SmartDownloadStore {
         return list;
     }
 
-    /**
-     * Returns unpinned cached tracks whose lastPlayedMs is older than cutoffMs.
-     */
     public synchronized List<SmartDownloadTrack> getInactiveCachedTracks(long cutoffMs) {
         ensureLoaded();
         List<SmartDownloadTrack> list = new ArrayList<>();
@@ -177,10 +213,6 @@ public final class SmartDownloadStore {
         return lastPersonalizationResetMs;
     }
 
-    /**
-     * Clears all non-pinned tracks (both cached and play history) for fresh personalization.
-     * Returns the videoIds of cached tracks that must be deleted from offline storage.
-     */
     public synchronized List<String> clearNonPinned(long nowMs) {
         ensureLoaded();
         List<String> toDelete = new ArrayList<>();
@@ -196,6 +228,25 @@ public final class SmartDownloadStore {
         lastPersonalizationResetMs = nowMs;
         saveLocked();
         return toDelete;
+    }
+
+    @Nullable
+    public synchronized String exportBackup() {
+        ensureLoaded();
+        File src = indexFile();
+        if (src == null || !src.exists() || Utils.getContext() == null) return null;
+        try {
+            File outDir = Utils.getContext().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (outDir == null) return null;
+            if (!outDir.exists() && !outDir.mkdirs()) return null;
+            File dst = new File(outDir, "Morphe_SmartCache_Backup.json");
+            byte[] data = Files.readAllBytes(src.toPath());
+            Files.write(dst.toPath(), data);
+            return dst.getAbsolutePath();
+        } catch (Exception ex) {
+            Logger.printException(() -> "SmartDownloadStore: exportBackup failed", ex);
+            return null;
+        }
     }
 
     private void saveLocked() {
@@ -235,6 +286,8 @@ public final class SmartDownloadStore {
 
     private static SmartDownloadTrack copyOf(SmartDownloadTrack src) {
         SmartDownloadTrack copy = new SmartDownloadTrack(src.videoId);
+        copy.title = src.title;
+        copy.artist = src.artist;
         copy.playCount = src.playCount;
         copy.firstPlayedMs = src.firstPlayedMs;
         copy.lastPlayedMs = src.lastPlayedMs;
