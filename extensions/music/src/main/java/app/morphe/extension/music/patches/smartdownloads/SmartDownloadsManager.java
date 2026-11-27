@@ -1,11 +1,13 @@
 package app.morphe.extension.music.patches.smartdownloads;
 
+import android.graphics.Bitmap;
 import android.media.MediaMetadata;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.io.File;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -96,6 +98,9 @@ public final class SmartDownloadsManager {
                 : VideoInformation.getVideoId();
         if (vid != null && VideoInformation.isVideoId(vid)) {
             store.updateMetadata(vid, activeTitle, activeArtist);
+            Bitmap art = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+            if (art == null) art = metadata.getBitmap(MediaMetadata.METADATA_KEY_ART);
+            if (art != null) store.saveThumbnailAsync(vid, art);
         }
     }
 
@@ -147,7 +152,6 @@ public final class SmartDownloadsManager {
 
         long lengthMs = VideoInformation.getVideoLength();
 
-        // Loop / Replay detection: if user restarted the same song from near 0 after a counted play
         if (countedCurrentPlay && lengthMs > 0
                 && currentPlaybackTimeMs >= 0 && currentPlaybackTimeMs <= 5000L
                 && lastPlaybackPosMs > (long) (lengthMs * 0.55)) {
@@ -254,6 +258,11 @@ public final class SmartDownloadsManager {
 
     public List<SmartDownloadTrack> getAllTracksSorted() {
         return store.getAllTracksSorted();
+    }
+
+    @Nullable
+    public File getThumbnailFile(@NonNull String videoId) {
+        return store.getThumbnailFile(videoId);
     }
 
     @Nullable
