@@ -1,9 +1,13 @@
 package app.morphe.extension.music.patches.smartdownloads;
 
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.os.BatteryManager;
+import android.os.StatFs;
 
 import androidx.annotation.NonNull;
 
@@ -17,13 +21,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
 
-/**
- * Sequential, throttled background download queue with Wi-Fi-only enforcement.
- */
 public final class SmartDownloadWorker {
 
-    private static final long DELAY_BETWEEN_DOWNLOADS_MS = 7_000L; // 5-10s throttle
-    private static final long RETRY_NETWORK_DELAY_MS = 30_000L;
+    private static final long DELAY_BETWEEN_DOWNLOADS_MS = 7_000L;
+    private static final long RETRY_GUARD_DELAY_MS = 30_000L;
+    private static final long MIN_FREE_STORAGE_BYTES = 500L * 1024L * 1024L; // 500 MB
+    private static final int MIN_BATTERY_PCT = 15;
 
     private final Queue<String> queue = new ConcurrentLinkedQueue<>();
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
@@ -64,43 +67,16 @@ public final class SmartDownloadWorker {
 
         if (SmartDownloadsManager.isWifiOnly() && !isOnUnmeteredWifi()) {
             Logger.printDebug(() -> "SmartDownloadWorker: waiting for unmetered Wi-Fi");
-            scheduleNext(RETRY_NETWORK_DELAY_MS);
+            scheduleNext(RETRY_GUARD_DELAY_MS);
             return;
         }
 
-        String videoId = queue.poll();
-        if (videoId == null) {
+        if (SmartDownloadsManager.isBatteryGuardEnabled() && isLowBatteryAndNotCharging()) {
+            Logger.printDebug(() -> "SmartDownloadWorker: paused due to low battery (<15%)");
+            scheduleNext(RETRY_GUARD_DELAY_MS);
             return;
         }
 
-        try {
-            manager.ensureCapacityForNewTrack();
-            boolean dispatched = SmartDownloadsPatch.dispatchOfflineAdd(videoId);
-            if (dispatched) {
-                manager.onTrackDownloadDispatched(videoId);
-            } else {
-                Logger.printDebug(() -> "SmartDownloadWorker: resolver not ready, re-queuing " + videoId);
-                queue.offer(videoId);
-            }
-        } catch (Exception ex) {
-            Logger.printException(() -> "SmartDownloadWorker: failed to download " + videoId, ex);
-        }
-
-        if (!queue.isEmpty()) {
-            scheduleNext(DELAY_BETWEEN_DOWNLOADS_MS);
-        }
-    }
-
-    private static boolean isOnUnmeteredWifi() {
-        Context context = Utils.getContext();
-        if (context == null) return false;
-        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm == null) return false;
-        Network active = cm.getActiveNetwork();
-        if (active == null) return false;
-        NetworkCapabilities caps = cm.getNetworkCapabilities(active);
-        if (caps == null) return false;
-        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
-    }
-}
+        if (!hasEnoughStorage()) {
+            Logger.printDebug(() -> "SmartDownloadWorker: low storage (<500MB), skipping download");
+            schedule
