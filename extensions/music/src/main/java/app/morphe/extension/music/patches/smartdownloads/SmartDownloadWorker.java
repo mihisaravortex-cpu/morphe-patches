@@ -79,4 +79,69 @@ public final class SmartDownloadWorker {
 
         if (!hasEnoughStorage()) {
             Logger.printDebug(() -> "SmartDownloadWorker: low storage (<500MB), skipping download");
-            schedule
+            scheduleNext(RETRY_GUARD_DELAY_MS);
+            return;
+        }
+
+        String videoId = queue.poll();
+        if (videoId == null) {
+            return;
+        }
+
+        try {
+            manager.ensureCapacityForNewTrack();
+            boolean dispatched = SmartDownloadsPatch.dispatchOfflineAdd(videoId);
+            if (dispatched) {
+                manager.onTrackDownloadDispatched(videoId);
+            } else {
+                queue.offer(videoId);
+            }
+        } catch (Exception ex) {
+            Logger.printException(() -> "SmartDownloadWorker: failed to download " + videoId, ex);
+        }
+
+        if (!queue.isEmpty()) {
+            scheduleNext(DELAY_BETWEEN_DOWNLOADS_MS);
+        }
+    }
+
+    private static boolean isOnUnmeteredWifi() {
+        Context context = Utils.getContext();
+        if (context == null) return false;
+        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) return false;
+        Network active = cm.getActiveNetwork();
+        if (active == null) return false;
+        NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+        return caps != null
+                && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+    }
+
+    private static boolean isLowBatteryAndNotCharging() {
+        Context context = Utils.getContext();
+        if (context == null) return false;
+        Intent battery = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (battery == null) return false;
+        int status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+        boolean charging = status == BatteryManager.BATTERY_STATUS_CHARGING
+                || status == BatteryManager.BATTERY_STATUS_FULL;
+        if (charging) return false;
+        int level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+        int scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+        if (level < 0 || scale <= 0) return false;
+        int pct = (int) ((level * 100f) / scale);
+        return pct < MIN_BATTERY_PCT;
+    }
+
+    private static boolean hasEnoughStorage() {
+        Context context = Utils.getContext();
+        if (context == null) return true;
+        try {
+            StatFs stat = new StatFs(context.getFilesDir().getAbsolutePath());
+            return stat.getAvailableBytes() >= MIN_FREE_STORAGE_BYTES;
+        } catch (Exception ex) {
+            return true;
+        }
+    }
+}
