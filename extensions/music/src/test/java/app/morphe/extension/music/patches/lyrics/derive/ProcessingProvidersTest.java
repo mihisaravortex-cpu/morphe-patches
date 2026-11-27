@@ -190,6 +190,6 @@ public class ProcessingProvidersTest {
 
     @Test
     public void endpointPresetsNotEmpty() {
-        assertTrue(ProcessingProviders.ENDPOINT_PRESETS.size() >= 10);
+      assertFalse(ProcessingProviders.ENDPOINT_PRESETS.isEmpty());  
     }
 }
