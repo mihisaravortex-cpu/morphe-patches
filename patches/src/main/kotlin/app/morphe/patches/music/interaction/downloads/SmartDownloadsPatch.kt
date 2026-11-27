@@ -1,8 +1,15 @@
 package app.morphe.patches.music.interaction.downloads
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
+import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.patch.patch
 import app.morphe.patcher.util.addPatchInterface
+import app.morphe.patcher.util.cloneParameters
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.getReference
+import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.misc.settings.PreferenceScreen
 import app.morphe.patches.music.misc.settings.settingsPatch
@@ -10,6 +17,7 @@ import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.patches.music.video.information.musicVideoInformationPatch
 import app.morphe.patches.music.video.information.musicVideoTimeHook
 import app.morphe.patches.shared.misc.fix.proto.fixProtoLibraryPatch
+import app.morphe.patches.shared.misc.fix.proto.parseByteArrayMethodRef
 import app.morphe.patches.shared.misc.fix.proto.parseByteArrayWithRegistryMethodRef
 import app.morphe.patches.shared.misc.fix.proto.protoDefaultInstanceFingerprint
 import app.morphe.patches.shared.misc.settings.preference.ListPreference
@@ -18,13 +26,27 @@ import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPrefer
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.shared.misc.settings.preference.TextPreference
 import app.morphe.patches.youtube.interaction.downloads.ResolveCommandFingerprint
+import app.morphe.util.addInstructionsAtControlFlowLabel
+import app.morphe.util.findInstructionIndicesReversedOrThrow
+import com.android.tools.smali.dexlib2.AccessFlags
+import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.reference.TypeReference
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/smartdownloads/SmartDownloadsPatch;"
+private const val MENU_ITEM_CLASS =
+    "Lapp/morphe/extension/music/patches/smartdownloads/SmartCacheMenuItem;"
 private const val DISPATCHER_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/smartdownloads/SmartDownloadsPatch$CommandDispatcher;"
 private const val GET_GENERATED_REGISTRY =
     "Lcom/google/protobuf/ExtensionRegistryLite;->getGeneratedRegistry()Lcom/google/protobuf/ExtensionRegistryLite;"
+
+private fun protoDefaultInstance(messageType: String) =
+    protoDefaultInstanceFingerprint(messageType).instructionMatches.first().fieldReference
 
 private val smartDownloadsResourcePatch = patch {
     dependsOn(settingsPatch)
@@ -44,8 +66,16 @@ private val smartDownloadsResourcePatch = patch {
                     ListPreference("morphe_smart_downloads_inactivity_days"),
                     ListPreference("morphe_smart_downloads_repersonalize_days"),
                     SwitchPreference("morphe_smart_downloads_wifi_only"),
-                    TextPreference("morphe_smart_downloads_status", tag = "android.preference.Preference"),
-                    TextPreference("morphe_smart_downloads_repersonalize_now", tag = "android.preference.Preference"),
+                    SwitchPreference("morphe_smart_downloads_like_boost"),
+                    SwitchPreference("morphe_smart_downloads_battery_guard"),
+                    TextPreference(
+                        "morphe_smart_downloads_status",
+                        tag = "app.morphe.extension.music.settings.preference.SmartCacheStatusPreference"
+                    ),
+                    TextPreference(
+                        "morphe_smart_downloads_repersonalize_now",
+                        tag = "app.morphe.extension.music.settings.preference.SmartCacheClearPreference"
+                    ),
                 )
             )
         )
@@ -54,7 +84,7 @@ private val smartDownloadsResourcePatch = patch {
 
 val smartDownloadsPatch = patch(
     name = "Smart Downloads",
-    description = "Automatically caches frequently played songs offline with LRU eviction and capacity limits.",
+    description = "Automatically caches frequently played songs offline with LRU eviction, pinning, and song-by-song management.",
 ) {
     dependsOn(
         smartDownloadsResourcePatch,
@@ -68,14 +98,11 @@ val smartDownloadsPatch = patch(
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
     execute {
-        // 1. Hook playback time ticks (~1000ms) for 65% valid play detection.
         musicVideoTimeHook(EXTENSION_CLASS, "onVideoTimeUpdate")
 
-        // 2. Expose CommandResolver to SmartDownloadsPatch for background OfflineCommand dispatch.
         ResolveCommandFingerprint.let { fp ->
             val commandType = fp.method.parameterTypes.first().toString()
-            val defaultInstanceField = protoDefaultInstanceFingerprint(commandType)
-                .instructionMatches.first().fieldReference
+            val defaultInstanceField = protoDefaultInstance(commandType)
 
             val invokeCmd = if (fp.method.parameterTypes.size >= 2) {
                 """
@@ -105,6 +132,79 @@ val smartDownloadsPatch = patch(
                 0,
                 "invoke-static { p0 }, $EXTENSION_CLASS->setCommandDispatcher($DISPATCHER_INTERFACE)V"
             )
+        }
+
+        // Inject "Pin to Smart Cache" / "Unpin" into YouTube Music's 3-dot song menu.
+        MusicMenuBottomSheetItemsFingerprint.let {
+            val menuField = it.instructionMatches.first().fieldReference
+            val menuItemType = it.instructionMatches[3].instruction.getReference<TypeReference>()!!.type
+            val addItemMethod = it.instructionMatches.last().methodReference
+            val itemsType = addItemMethod.definingClass
+
+            val addSmartMenuItemMethod = ImmutableMethod(
+                it.classDef.type,
+                "patch_addSmartMenuItems",
+                listOf(
+                    ImmutableMethodParameter(itemsType, null, null),
+                    ImmutableMethodParameter("Ljava/lang/Object;", null, null)
+                ),
+                "V",
+                AccessFlags.PRIVATE.value or AccessFlags.STATIC.value,
+                null,
+                null,
+                MutableMethodImplementation(7),
+            ).toMutable().apply {
+                addInstructionsWithLabels(
+                    0,
+                    """
+                        invoke-static { p1 }, $MENU_ITEM_CLASS->getSmartMenuItems(Ljava/lang/Object;)[[B
+                        move-result-object v0
+                        array-length v1, v0
+                        const/4 v2, 0x0
+                        sget-object v3, ${protoDefaultInstance(menuItemType)}
+                        :next_smart_item
+                        if-ge v2, v1, :no_more_smart_items
+                        aget-object v4, v0, v2
+                        invoke-static { v3, v4 }, ${parseByteArrayMethodRef.get()!!}
+                        move-result-object v4
+                        invoke-virtual { p0, v4 }, $addItemMethod
+                        add-int/lit8 v2, v2, 0x1
+                        goto :next_smart_item
+                        :no_more_smart_items
+                        return-void
+                    """
+                )
+            }
+            it.classDef.methods.add(addSmartMenuItemMethod)
+
+            it.method.cloneParameters().apply {
+                findInstructionIndicesReversedOrThrow(Opcode.RETURN_OBJECT).forEach { index ->
+                    val itemsRegister = getInstruction<OneRegisterInstruction>(index).registerA
+                    val menuRegister = findFreeRegister(index, itemsRegister)
+
+                    addInstructionsAtControlFlowLabel(
+                        index,
+                        """
+                            iget-object v$menuRegister, p0, $menuField
+                            invoke-static { v$itemsRegister, v$menuRegister }, $addSmartMenuItemMethod
+                        """
+                    )
+                }
+            }
+        }
+
+        MenuItemClickFingerprint.let {
+            val menuItemField = it.instructionMatches.first().fieldReference
+            it.method.apply {
+                val register = findFreeRegister(0)
+                addInstructions(
+                    0,
+                    """
+                        iget-object v$register, p0, $menuItemField
+                        invoke-static { v$register }, $MENU_ITEM_CLASS->onMenuItemClick(Ljava/lang/Object;)V
+                    """
+                )
+            }
         }
     }
 }
