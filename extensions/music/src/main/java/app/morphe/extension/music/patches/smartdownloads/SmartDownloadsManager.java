@@ -1,6 +1,10 @@
 package app.morphe.extension.music.patches.smartdownloads;
 
+import android.media.MediaMetadata;
+import android.widget.Toast;
+
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -8,17 +12,11 @@ import java.util.concurrent.TimeUnit;
 import app.morphe.extension.music.settings.Settings;
 import app.morphe.extension.music.shared.VideoInformation;
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.Utils;
 
-/**
- * Core Smart Cache / Smart Downloads engine:
- * - Tracks valid plays (>= 65% of track duration).
- * - Triggers caching at >= configured play threshold (default 3).
- * - Enforces capacity cap (>= 40, default 60) via LRU unpinned eviction.
- * - Enforces inactivity eviction (default 14 days) and optional periodic re-personalization.
- */
 public final class SmartDownloadsManager {
 
-    private static final double VALID_PLAY_RATIO = 0.65; // 60%-70% threshold
+    private static final double VALID_PLAY_RATIO = 0.65;
     private static final long TICK_INTERVAL_MS = 1000L;
     public static final int MIN_CAPACITY = 40;
 
@@ -28,8 +26,11 @@ public final class SmartDownloadsManager {
     private final SmartDownloadWorker worker = new SmartDownloadWorker(this);
 
     private volatile String activeVideoId = "";
+    private volatile String activeTitle = "";
+    private volatile String activeArtist = "";
     private volatile long accumulatedPlayMs = 0L;
     private volatile long lastTickWallMs = 0L;
+    private volatile long lastPlaybackPosMs = 0L;
     private volatile boolean countedCurrentPlay = false;
 
     private SmartDownloadsManager() {
@@ -48,26 +49,86 @@ public final class SmartDownloadsManager {
         return Settings.SMART_DOWNLOADS_WIFI_ONLY.get();
     }
 
+    public static boolean isBatteryGuardEnabled() {
+        return Settings.SMART_DOWNLOADS_BATTERY_GUARD.get();
+    }
+
+    public static boolean isLikeBoostEnabled() {
+        return Settings.SMART_DOWNLOADS_LIKE_BOOST.get();
+    }
+
     public static int getPlayThreshold() {
-        return Math.max(3, Settings.SMART_DOWNLOADS_PLAY_THRESHOLD.get());
+        return Math.max(3, parseIntSafe(Settings.SMART_DOWNLOADS_PLAY_THRESHOLD.get(), 3));
     }
 
     public static int getMaxCapacity() {
-        return Math.max(MIN_CAPACITY, Settings.SMART_DOWNLOADS_MAX_SONGS.get());
+        return Math.max(MIN_CAPACITY, parseIntSafe(Settings.SMART_DOWNLOADS_MAX_SONGS.get(), 60));
     }
 
     public static int getInactivityDays() {
-        return Settings.SMART_DOWNLOADS_INACTIVITY_DAYS.get(); // 0 = Never, 7, 14, 30
+        return parseIntSafe(Settings.SMART_DOWNLOADS_INACTIVITY_DAYS.get(), 14);
     }
 
     public static int getRePersonalizeDays() {
-        return Settings.SMART_DOWNLOADS_REPERSONALIZE_DAYS.get(); // 0 = Off, 30, 60
+        return parseIntSafe(Settings.SMART_DOWNLOADS_REPERSONALIZE_DAYS.get(), 0);
+    }
+
+    private static int parseIntSafe(@Nullable String value, int fallback) {
+        if (value == null || value.isBlank()) return fallback;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
+    }
+
+    public void onMetadataUpdated(@Nullable MediaMetadata metadata) {
+        if (metadata == null) return;
+        String title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE);
+        String artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST);
+        String mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID);
+
+        if (title != null && !title.isBlank()) activeTitle = title.trim();
+        if (artist != null && !artist.isBlank()) activeArtist = artist.trim();
+
+        String vid = (mediaId != null && VideoInformation.isVideoId(mediaId))
+                ? mediaId
+                : VideoInformation.getVideoId();
+        if (vid != null && VideoInformation.isVideoId(vid)) {
+            store.updateMetadata(vid, activeTitle, activeArtist);
+        }
+    }
+
+    public void onLikeClicked(@Nullable String serviceName, @Nullable String videoId) {
+        if (!isEnabled() || !isLikeBoostEnabled()) return;
+        if (!"like/like".equals(serviceName)) return;
+        String vid = (videoId != null && VideoInformation.isVideoId(videoId))
+                ? videoId
+                : VideoInformation.getVideoId();
+        if (vid == null || !VideoInformation.isVideoId(vid)) return;
+
+        store.updateMetadata(vid, activeTitle, activeArtist);
+        SmartDownloadTrack track = store.getAllTracksSorted().stream()
+                .filter(t -> t.videoId.equals(vid))
+                .findFirst()
+                .orElse(null);
+        if (track == null || !track.isCached) {
+            worker.enqueue(vid);
+            Utils.runOnMainThreadNowOrLater(() -> {
+                if (Utils.getContext() != null) {
+                    Toast.makeText(Utils.getContext(), "Smart Cache: Queued liked song", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
     }
 
     private void onNewVideoId(@NonNull String videoId) {
         activeVideoId = videoId;
+        activeTitle = "";
+        activeArtist = "";
         accumulatedPlayMs = 0L;
         lastTickWallMs = System.currentTimeMillis();
+        lastPlaybackPosMs = 0L;
         countedCurrentPlay = false;
 
         if (isEnabled()) {
@@ -75,9 +136,6 @@ public final class SmartDownloadsManager {
         }
     }
 
-    /**
-     * Called ~every 1000ms from VideoInformation.setVideoTime / musicVideoTimeHook.
-     */
     public void onPlaybackTick(long currentPlaybackTimeMs) {
         if (!isEnabled()) return;
         String videoId = VideoInformation.getVideoId();
@@ -86,6 +144,18 @@ public final class SmartDownloadsManager {
         if (!videoId.equals(activeVideoId)) {
             onNewVideoId(videoId);
         }
+
+        long lengthMs = VideoInformation.getVideoLength();
+
+        // Loop / Replay detection: if user restarted the same song from near 0 after a counted play
+        if (countedCurrentPlay && lengthMs > 0
+                && currentPlaybackTimeMs >= 0 && currentPlaybackTimeMs <= 5000L
+                && lastPlaybackPosMs > (long) (lengthMs * 0.55)) {
+            accumulatedPlayMs = 0L;
+            countedCurrentPlay = false;
+            lastTickWallMs = System.currentTimeMillis();
+        }
+        lastPlaybackPosMs = currentPlaybackTimeMs;
 
         if (countedCurrentPlay) return;
 
@@ -98,7 +168,6 @@ public final class SmartDownloadsManager {
             accumulatedPlayMs += TICK_INTERVAL_MS;
         }
 
-        long lengthMs = VideoInformation.getVideoLength();
         if (lengthMs > 0 && accumulatedPlayMs >= (long) (lengthMs * VALID_PLAY_RATIO)) {
             countedCurrentPlay = true;
             onValidPlayCompleted(videoId, now);
@@ -106,8 +175,8 @@ public final class SmartDownloadsManager {
     }
 
     private void onValidPlayCompleted(@NonNull String videoId, long nowMs) {
-        SmartDownloadTrack track = store.recordValidPlay(videoId, nowMs);
-        Logger.printDebug(() -> "SmartDownloads: valid play #" + track.playCount + " for " + videoId);
+        SmartDownloadTrack track = store.recordValidPlay(videoId, nowMs, activeTitle, activeArtist);
+        Logger.printDebug(() -> "SmartDownloads: valid play #" + track.playCount + " for " + track.displayName());
 
         if (!track.isCached && track.playCount >= getPlayThreshold()) {
             worker.enqueue(videoId);
@@ -117,28 +186,23 @@ public final class SmartDownloadsManager {
     public void runMaintenance() {
         long now = System.currentTimeMillis();
 
-        // 1. Optional Periodic Re-Personalization
         int resetDays = getRePersonalizeDays();
         if (resetDays > 0) {
             long resetMs = TimeUnit.DAYS.toMillis(resetDays);
             if (now - store.getLastPersonalizationResetMs() >= resetMs) {
-                Logger.printInfo(() -> "SmartDownloads: running periodic re-personalization");
                 rePersonalizeNow();
                 return;
             }
         }
 
-        // 2. Inactivity / LRU Eviction
         int inactiveDays = getInactivityDays();
         if (inactiveDays > 0) {
             long cutoffMs = now - TimeUnit.DAYS.toMillis(inactiveDays);
-            List<SmartDownloadTrack> inactive = store.getInactiveCachedTracks(cutoffMs);
-            for (SmartDownloadTrack track : inactive) {
+            for (SmartDownloadTrack track : store.getInactiveCachedTracks(cutoffMs)) {
                 evictTrack(track.videoId);
             }
         }
 
-        // 3. Enforce cap if user lowered limit
         int cap = getMaxCapacity();
         if (store.getCachedCount() > cap) {
             List<SmartDownloadTrack> lru = store.getCachedUnpinnedLruOrder();
@@ -152,7 +216,6 @@ public final class SmartDownloadsManager {
     public void ensureCapacityForNewTrack() {
         int cap = getMaxCapacity();
         if (store.getCachedCount() < cap) return;
-
         List<SmartDownloadTrack> lru = store.getCachedUnpinnedLruOrder();
         int toEvict = (store.getCachedCount() - cap) + 1;
         for (int i = 0; i < toEvict && i < lru.size(); i++) {
@@ -161,36 +224,45 @@ public final class SmartDownloadsManager {
     }
 
     private void evictTrack(@NonNull String videoId) {
-        Logger.printDebug(() -> "SmartDownloads: evicting " + videoId);
         SmartDownloadsPatch.dispatchOfflineRemove(videoId);
         store.markEvicted(videoId);
     }
 
+    public void deleteSingleTrack(@NonNull String videoId) {
+        SmartDownloadsPatch.dispatchOfflineRemove(videoId);
+        store.removeTrackCompletely(videoId);
+    }
+
     void onTrackDownloadDispatched(@NonNull String videoId) {
-        // Approximate size or 0 until exported/measured; native engine handles actual storage
         store.markCached(videoId, System.currentTimeMillis(), 0L);
     }
 
     public void rePersonalizeNow() {
         worker.clearQueue();
-        List<String> toDelete = store.clearNonPinned(System.currentTimeMillis());
-        for (String videoId : toDelete) {
+        for (String videoId : store.clearNonPinned(System.currentTimeMillis())) {
             SmartDownloadsPatch.dispatchOfflineRemove(videoId);
         }
     }
 
-    public boolean togglePin(@NonNull String videoId) {
-        return store.togglePin(videoId);
+    public boolean togglePin(@NonNull String videoId, @Nullable String title, @Nullable String artist) {
+        return store.togglePin(videoId, title, artist);
     }
 
     public boolean isPinned(@NonNull String videoId) {
         return store.isPinned(videoId);
     }
 
+    public List<SmartDownloadTrack> getAllTracksSorted() {
+        return store.getAllTracksSorted();
+    }
+
+    @Nullable
+    public String exportBackup() {
+        return store.exportBackup();
+    }
+
     public String getStatusSummary() {
-        int count = store.getCachedCount();
-        int cap = getMaxCapacity();
-        long mb = store.getTotalCachedBytes() / (1024L * 1024L);
-        return count + " / " + cap + " songs cached • " + mb + " MB";
+        return store.getCachedCount() + " / " + getMaxCapacity() + " songs cached • "
+                + store.getPinnedCount() + " pinned";
     }
 }
