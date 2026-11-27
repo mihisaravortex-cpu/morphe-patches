@@ -27,7 +27,7 @@ public class SmartCacheClearPreference extends Preference {
                 "Clear All Non-Pinned Tracks"
         };
 
-        new AlertDialog.Builder(context)
+        new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Re-personalize / Clear Smart Cache")
                 .setItems(options, (d, which) -> {
                     if (which == 0) {
@@ -55,7 +55,7 @@ public class SmartCacheClearPreference extends Preference {
             names[i] = t.displayName() + (t.isPinned ? " 📌" : "");
         }
 
-        new AlertDialog.Builder(context)
+        new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Select Songs to Delete")
                 .setMultiChoiceItems(names, checked, (d, idx, isChecked) -> checked[idx] = isChecked)
                 .setPositiveButton("Delete Selected", (d, w) -> {
@@ -73,7 +73,7 @@ public class SmartCacheClearPreference extends Preference {
     }
 
     private void confirmClearAll(Context context) {
-        new AlertDialog.Builder(context)
+        new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Clear All Non-Pinned?")
                 .setMessage("Pinned songs will be kept safe. All other cached songs and play counts will be cleared.")
                 .setPositiveButton("Clear", (d, w) -> {
