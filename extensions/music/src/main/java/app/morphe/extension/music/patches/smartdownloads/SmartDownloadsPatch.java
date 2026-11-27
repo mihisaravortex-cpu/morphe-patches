@@ -1,5 +1,7 @@
 package app.morphe.extension.music.patches.smartdownloads;
 
+import android.widget.Toast;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -84,7 +86,18 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
             return false;
         }
         try {
-            Utils.runOnMainThreadNowOrLater(() -> dispatcher.patch_resolveCommand(commandBytes));
+            Utils.runOnMainThreadNowOrLater(() -> {
+                try {
+                    dispatcher.patch_resolveCommand(commandBytes);
+                } catch (Throwable ex) {
+                    Logger.printException(() -> "SmartDownloads: patch_resolveCommand error", ex);
+                    if (Utils.getContext() != null) {
+                        Toast.makeText(Utils.getContext(),
+                                "SmartDL Err: " + ex.getClass().getSimpleName() + ": " + ex.getMessage(),
+                                Toast.LENGTH_LONG).show();
+                    }
+                }
+            });
             return true;
         } catch (Exception ex) {
             Logger.printException(() -> "SmartDownloads: dispatchBytes failure", ex);
