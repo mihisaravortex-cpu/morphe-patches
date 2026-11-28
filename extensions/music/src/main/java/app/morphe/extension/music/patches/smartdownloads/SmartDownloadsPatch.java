@@ -28,6 +28,8 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
 
     private static volatile WeakReference<CommandDispatcher> dispatcherRef = new WeakReference<>(null);
     private static volatile WeakReference<OfflineHandler> offlineHandlerRef = new WeakReference<>(null);
+    private static volatile boolean debugEntered = false;
+    private static volatile boolean debugSaveReached = false;
 
     private SmartDownloadsPatch() {
     }
@@ -38,6 +40,14 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
 
     public static void setOfflineHandler(@NonNull OfflineHandler handler) {
         offlineHandlerRef = new WeakReference<>(handler);
+    }
+
+    public static void onDebugOfflineEntered() {
+        debugEntered = true;
+    }
+
+    public static void onDebugSaveCallReached() {
+        debugSaveReached = true;
     }
 
     public static void onVideoTimeUpdate(long currentPlaybackTimeMs) {
@@ -85,11 +95,20 @@ public final class SmartDownloadsPatch extends BaseInAppDownloadsPatch {
         }
         try {
             Utils.runOnMainThreadNowOrLater(() -> {
+                debugEntered = false;
+                debugSaveReached = false;
                 try {
                     if (offlineHandler != null) {
                         offlineHandler.patch_handleOffline(commandBytes, endpointBytes);
                     } else {
                         dispatcher.patch_resolveCommand(commandBytes);
+                    }
+                    if (Utils.getContext() != null) {
+                        String msg = "SmartDL: H=" + (offlineHandler != null ? 1 : 0)
+                                + " D=" + (dispatcher != null ? 1 : 0)
+                                + " E=" + (debugEntered ? 1 : 0)
+                                + " S=" + (debugSaveReached ? 1 : 0);
+                        Toast.makeText(Utils.getContext(), msg, Toast.LENGTH_LONG).show();
                     }
                 } catch (Throwable ex) {
                     Logger.printException(() -> "SmartDownloads: dispatch error", ex);
