@@ -140,7 +140,6 @@ val smartDownloadsPatch = patch(
             )
         }
 
-        // Direct OfflineVideoEndpoint handler hook (bypasses CommandResolver routing issues).
         MusicOfflineVideoEndpointFingerprint.let { offlineFp ->
             val offlineParamType = offlineFp.method.parameterTypes.first().toString()
             val bytesReg = if (offlineParamType == commandType) "p1" else "p2"
@@ -170,13 +169,29 @@ val smartDownloadsPatch = patch(
                 initIndex,
                 "invoke-static { p0 }, $EXTENSION_CLASS->setOfflineHandler($OFFLINE_HANDLER_INTERFACE)V"
             )
+
+            val saveCallRef = offlineFp.instructionMatches.first().methodReference
+            val currentSaveIdx = offlineFp.method.indexOfFirstInstructionOrThrow(
+                methodCall(
+                    definingClass = saveCallRef.definingClass,
+                    name = saveCallRef.name,
+                    parameters = saveCallRef.parameterTypes.map { it.toString() },
+                    returnType = saveCallRef.returnType
+                )
+            )
             offlineFp.method.addInstruction(
+                currentSaveIdx,
+                "invoke-static { }, $EXTENSION_CLASS->onDebugSaveCallReached()V"
+            )
+            offlineFp.method.addInstructions(
                 0,
-                "invoke-static { p0 }, $EXTENSION_CLASS->setOfflineHandler($OFFLINE_HANDLER_INTERFACE)V"
+                """
+                    invoke-static { }, $EXTENSION_CLASS->onDebugOfflineEntered()V
+                    invoke-static { p0 }, $EXTENSION_CLASS->setOfflineHandler($OFFLINE_HANDLER_INTERFACE)V
+                """
             )
         }
 
-        // Inject "Pin to Smart Cache" / "Unpin" into YouTube Music's 3-dot song menu.
         MusicMenuBottomSheetItemsFingerprint.let {
             val menuField = it.instructionMatches.first().fieldReference
             val menuItemType = it.instructionMatches[3].instruction.getReference<TypeReference>()!!.type
